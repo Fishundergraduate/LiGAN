@@ -2,7 +2,8 @@ import sys, os
 from collections import defaultdict
 
 sys.path.append('..')
-from ligan import molecules as m
+sys.path.append('.')
+from ligan import molecules
 
 
 def split_sdf(sdf_file):
@@ -15,12 +16,12 @@ def split_sdf(sdf_file):
     in_dir, in_base = os.path.split(sdf_file)
     mol_name = in_base.split('.', 1)[0]
     pose_count = defaultdict(int)
-    for mol in m.read_rd_mols_from_sdf_file(sdf_file, sanitize=False):
+    for mol in molecules.read_rd_mols_from_sdf_file(sdf_file, sanitize=False):
         #mol_name = mol.GetProp('_Name')
         pose_index = pose_count[mol_name]
         out_base = '{}_{}.sdf.gz'.format(mol_name, pose_index)
         out_file = os.path.join(in_dir, out_base)
-        m.write_rd_mol_to_sdf_file(out_file, mol, name=mol_name, kekulize=True)
+        molecules.write_rd_mol_to_sdf_file(out_file, mol, name=mol_name, kekulize=True)
         print('\tWriting', out_file)
         pose_count[mol_name] += 1
 
