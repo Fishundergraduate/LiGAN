@@ -21,7 +21,7 @@ MB = 1024 ** 2
 
 class MoleculeGenerator(object):
     '''
-    Base class for generating 3D molecules
+    Base class for generating 2D molecules
     using a generative model, atom fitting,
     and bond adding algorithms.
     '''
