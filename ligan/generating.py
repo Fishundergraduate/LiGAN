@@ -1451,7 +1451,7 @@ class OutputWriter(object):
         m.loc[idx, mol_type+'_UFF_time'] = uff_mol.info['min_time']
 
         # compare energy to ref mol, before and after minimizing
-        if ref_mol:
+        """ if ref_mol:
             ref_uff_mol = ref_mol.info['uff_mol']
             ref_uff_init = ref_uff_mol.info['E_init']
             ref_uff_min = ref_uff_mol.info['E_min']
@@ -1494,7 +1494,7 @@ class OutputWriter(object):
             m.loc[idx, mol_type+'_vina_aff_diff'] = vina_aff - ref_vina_aff
             m.loc[idx, mol_type+'_vina_rmsd_diff'] = vina_rmsd - ref_vina_rmsd
             m.loc[idx, mol_type+'_cnn_pose_diff'] = cnn_pose - ref_cnn_pose
-            m.loc[idx, mol_type+'_cnn_aff_diff'] = cnn_aff - ref_cnn_aff
+            m.loc[idx, mol_type+'_cnn_aff_diff'] = cnn_aff - ref_cnn_aff """
 
 
 def read_rec_from_pdb_file(pdb_file):
