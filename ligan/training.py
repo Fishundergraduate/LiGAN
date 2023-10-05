@@ -145,11 +145,13 @@ class GenerativeSolver(nn.Module):
         
 
     def init_data(self, device, train_file, test_file, **data_kws):
-        self.train_data = \
+        self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=data_kws['batch_size'], train_ratio=data_kws['train_ratio'])
+        """ self.train_data = \
             data.AtomGridData(device=device, data_file=train_file, **data_kws)
         self.test_data = \
-            data.AtomGridData(device=device, data_file=test_file, **data_kws)
-
+            data.AtomGridData(device=device, data_file=test_file, **data_kws) """
+        self.train_data = None
+        self.test_data=None
     def init_gen_model(
         self,
         device,

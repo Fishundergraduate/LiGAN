@@ -18,6 +18,53 @@ from rdkit.Chem.rdmolops import GetAdjacencyMatrix
 # Pytorch and Pytorch Geometric
 from torch_geometric.data import Data
 from torch.utils.data import DataLoader
+from graphsite import Graphsite
+from torchdata import datapipes
+
+gs = Graphsite()
+
+def __split_train_test(train_ratio=0.9):
+    return lambda _: int(np.random.binomial(1,1-train_ratio))
+
+def makePocketDatapipe(datarootDir:str):
+    """
+    datarootDir: path to data
+    data
+        |--pocket-data
+        |--protein-data-part1
+        |--protein-data-part2
+    """
+    __pock_pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=True)
+    __pock_pipe = __pock_pipe.filter(filter_fn=lambda x: x.endswith("mol2"))
+    __pock_pipe = __pock_pipe.map(lambda x:{
+        'pockID' : x.split("/")[-1][:5],#Key index
+        'pockPath': x
+    })
+    __prot_pipe_1 = datapipes.iter.FileLister(datarootDir+"/protein-data-part1",recursive=True)
+    __prot_pipe_2 = datapipes.iter.FileLister(datarootDir+"/protein-data-part2",recursive=True)
+    __prot_pipe = __prot_pipe_1.concat(__prot_pipe_2)
+    __prot_pipe = __prot_pipe.filter(filter_fn=lambda x: x.endswith("pops"))
+    __prot_pipe = __prot_pipe.map(lambda x:{
+        'pockID': x.split("/")[-2],
+        'profilePath': ".".join(x.split(".")[:-1])+".profile", # change extension to .profile
+        'popsPath':x
+    })
+    pipe = __pock_pipe.zip_with_iter(
+        __prot_pipe,
+        key_fn=lambda x: x['pockID'],
+        ref_key_fn=lambda x:x['pockID'],
+        merge_fn=lambda x,y:dict(x, **y)
+    )
+    pipe = pipe.map(lambda x: gs(mol_path=x['pockPath'],
+                                 profile_path=x['profilePath'],
+                                 pop_path=x['popsPath']))
+    pipe = pipe
+    return pipe
+
+def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
+    __mySplitter=__split_train_test(train_ratio=train_ratio)
+    __train_pipe, __test_pipe = makePocketDatapipe(datarootDir=datarootDir).demux(num_instances=3, classifier_fn=__mySplitter)
+    return DataLoader(__train_pipe,batch_size=batch_size,shuffle=True), DataLoader(__test_pipe, batch_size)
 
 class MolDataset(utils.data.IterableDataset):
 
