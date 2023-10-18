@@ -531,7 +531,6 @@ class GridEncoder(nn.Module):
     def __init__(
         self,
         n_channels,
-        grid_size=48,
         n_filters=32,
         width_factor=2,
         n_levels=4,
@@ -558,7 +557,6 @@ class GridEncoder(nn.Module):
 
         # track changing grid dimensions
         self.n_channels = n_channels
-        self.grid_size = grid_size
 
         if init_conv_pool:
 
@@ -636,13 +634,9 @@ class GridEncoder(nn.Module):
         self.add_module(name, conv)
         self.grid_modules.append(conv)
         self.n_channels = n_filters
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def add_pool2d(self, name, pool_factor, **kwargs):
-        assert self.grid_size % pool_factor == 0, \
-            'cannot pool remaining spatial dims ({} % {})'.format(
-                self.grid_size, pool_factor
-            )
         pool = Pool2d(
             n_channels=self.n_channels,
             pool_factor=pool_factor,
@@ -650,8 +644,7 @@ class GridEncoder(nn.Module):
         )
         self.add_module(name, pool)
         self.grid_modules.append(pool)
-        self.grid_size //= pool_factor
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def add_conv2d_block(self, name, n_filters, **kwargs):
         conv_block = Conv2dBlock(
@@ -662,16 +655,16 @@ class GridEncoder(nn.Module):
         self.add_module(name, conv_block)
         self.grid_modules.append(conv_block)
         self.n_channels = n_filters
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def add_grid2vec(self, name, **kwargs):
         fc = Grid2Vec(
-            in_shape=(self.n_channels,) + (self.grid_size,)*3,
+            in_shape=(self.n_channels,),
             **kwargs
         )
         self.add_module(name, fc)
         self.task_modules.append(fc)
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def forward(self, inputs):
 
@@ -694,11 +687,6 @@ class GridEncoder(nn.Module):
         return reduce_list(outputs), conv_features
 
 
-# this is basically just an alias
-class Discriminator(GridEncoder):
-    pass
-
-
 class GridDecoder(nn.Module):
     '''
     A fully connected layer followed by a
@@ -712,7 +700,6 @@ class GridDecoder(nn.Module):
     def __init__(
         self,
         n_input,
-        grid_size,
         n_channels,
         width_factor,
         n_levels,
@@ -742,7 +729,6 @@ class GridDecoder(nn.Module):
             name='fc',
             n_input=n_input,
             n_channels=n_channels,
-            grid_size=grid_size,
             relu_leak=relu_leak,
             batch_norm=batch_norm,
             spectral_norm=spectral_norm,
@@ -823,16 +809,15 @@ class GridDecoder(nn.Module):
         if self.debug:
             print('DEBUG', *args, **kwargs, file=sys.stderr)
 
-    def add_vec2grid(self, name, n_channels, grid_size, **kwargs):
+    def add_vec2grid(self, name, n_channels, **kwargs):
         vec2grid = Vec2Grid(
-            out_shape=(n_channels,) + (grid_size,)*3,
+            out_shape=(n_channels,),
             **kwargs
         )
         self.add_module(name, vec2grid)
         self.fc_modules.append(vec2grid)
         self.n_channels = n_channels
-        self.grid_size = grid_size
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def add_unpool2d(self, name, unpool_factor, **kwargs):
         unpool = Unpool2d(
@@ -842,8 +827,7 @@ class GridDecoder(nn.Module):
         )
         self.add_module(name, unpool)
         self.grid_modules.append(unpool)
-        self.grid_size *= unpool_factor
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def add_tconv2d(self, name, n_filters, **kwargs):
         tconv = TConv2dReLU(
@@ -854,7 +838,7 @@ class GridDecoder(nn.Module):
         self.add_module(name, tconv)
         self.grid_modules.append(tconv)
         self.n_channels = n_filters
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def add_tconv2d_block(
         self, name, n_filters, n_skip_channels, **kwargs
@@ -867,7 +851,7 @@ class GridDecoder(nn.Module):
         self.add_module(name, tconv_block)
         self.grid_modules.append(tconv_block)
         self.n_channels = n_filters
-        self.print(name, self.n_channels, self.grid_size)
+        self.print(name, self.n_channels)
 
     def forward(self, inputs, skip_features=None):
 
@@ -909,7 +893,6 @@ class GridGenerator(nn.Sequential):
         n_channels_in=None,
         n_channels_cond=None,
         n_channels_out=19,
-        grid_size=48,
         n_filters=32,
         width_factor=2,
         n_levels=4,
@@ -953,7 +936,6 @@ class GridGenerator(nn.Sequential):
 
             self.input_encoder = GridEncoder(
                 n_channels=n_channels_in,
-                grid_size=grid_size,
                 n_filters=n_filters,
                 width_factor=width_factor,
                 n_levels=n_levels,
@@ -976,7 +958,6 @@ class GridGenerator(nn.Sequential):
 
             self.conditional_encoder = GridEncoder(
                 n_channels=n_channels_cond,
-                grid_size=grid_size,
                 n_filters=n_filters,
                 width_factor=width_factor,
                 n_levels=n_levels,
@@ -999,7 +980,6 @@ class GridGenerator(nn.Sequential):
 
         self.decoder = GridDecoder(
             n_input=self.n_decoder_input,
-            grid_size=grid_size // pool_factor**n_pools,
             n_channels=n_filters * width_factor**n_pools,
             width_factor=width_factor,
             n_levels=n_levels,
@@ -1069,53 +1049,6 @@ class GridGenerator(nn.Sequential):
 
         return latent_vecs
 
-
-class AE(GridGenerator):
-    is_variational = False
-    has_input_encoder = True
-    has_conditional_encoder = False
-
-    def forward(self, inputs=None, conditions=None, batch_size=None):
-
-        if inputs is None: # "prior", not expected to work
-            in_latents = self.sample_latent(batch_size)
-        else: # posterior
-            in_latents, _ = self.input_encoder(inputs)
-
-        outputs = self.decoder(inputs=in_latents)
-        return outputs, in_latents, None, None
-
-
-class VAE(GridGenerator):
-    is_variational = True
-    has_input_encoder = True
-    has_conditional_encoder = False
-
-    def forward(self, inputs=None, conditions=None, batch_size=None):
-
-        if inputs is None: # prior
-            means, log_stds = None, None
-        else: # posterior
-            (means, log_stds), _ = self.input_encoder(inputs)
-
-        var_latents = self.sample_latent(batch_size, means, log_stds)
-        outputs = self.decoder(inputs=var_latents)
-        return outputs, var_latents, means, log_stds
-
-
-class CE(GridGenerator):
-    is_variational = False
-    has_input_encoder = False
-    has_conditional_encoder = True
-
-    def forward(self, inputs=None, conditions=None, batch_size=None):
-        cond_latents, cond_features = self.conditional_encoder(conditions)
-        outputs = self.decoder(
-            inputs=cond_latents, skip_features=cond_features
-        )
-        return outputs, cond_latents, None, None
-
-
 class CVAE(GridGenerator):
     is_variational = True
     has_input_encoder = True
@@ -1137,180 +1070,3 @@ class CVAE(GridGenerator):
             inputs=cat_latents, skip_features=cond_features
         )
         return outputs, in_latents, means, log_stds
-
-
-class GAN(GridGenerator):
-    is_variational = True # just means we provide noise to decoder
-    has_input_encoder = False
-    has_conditional_encoder = False
-
-    def forward(self, inputs=None, conditions=None, batch_size=None):
-        var_latents = self.sample_latent(batch_size)
-        outputs = self.decoder(inputs=var_latents)
-        return outputs, var_latents, None, None
-
-
-class CGAN(GridGenerator):
-    is_variational = True # just means we provide noise to decoder
-    has_input_encoder = False
-    has_conditional_encoder = True
-
-    def forward(self, inputs=None, conditions=None, batch_size=None):
-        var_latents = self.sample_latent(batch_size)
-        cond_latents, cond_features = self.conditional_encoder(conditions)
-        cat_latents = torch.cat([var_latents, cond_latents], dim=1)
-        outputs = self.decoder(
-            inputs=cat_latents, skip_features=cond_features
-        )
-        return outputs, var_latents, None, None
-
-
-# aliases that correspond to solver type
-VAEGAN = VAE
-CVAEGAN = CVAE
-
-
-class VAE2(VAE):
-    has_stage2 = True
-    '''
-    This is a module that allows insertion of
-    a prior model, aka stage 2 VAE, into an
-    existing VAE model, aka a two-stage VAE.
-    '''
-    def forward2(
-        self,
-        prior_model,
-        inputs=None,
-        conditions=None,
-        batch_size=None,
-        **kwargs,
-    ):
-        if inputs is None: # prior
-            var_latents = means = log_stds = None
-
-        else: # stage-1 posterior
-            (means, log_stds), _ = self.input_encoder(inputs)
-            var_latents = self.sample_latent(
-                batch_size, means, log_stds, **kwargs
-            )
-
-        # insert prior model (output is stage-2 posterior or prior)
-        gen_latents, _, means2, log_stds2 = prior_model(
-            inputs=var_latents, batch_size=batch_size
-        )
-
-        outputs = self.decoder(inputs=gen_latents)
-        return (
-            outputs, var_latents, means, log_stds,
-            gen_latents, means2, log_stds2
-        )
-
-
-class CVAE2(CVAE):
-    has_stage2 = True
-    '''
-    Two-stage CVAE.
-    '''
-    def forward2(
-        self,
-        prior_model,
-        inputs=None,
-        conditions=None,
-        batch_size=None,
-        **kwargs,
-    ):
-        if inputs is None: # prior
-            in_latents = means = log_stds = None
-
-        else: # stage-1 posterior
-            (means, log_stds), _ = self.input_encoder(inputs)
-            in_latents = self.sample_latent(
-                batch_size, means, log_stds, **kwargs
-            )
-
-        # insert prior model (output is stage-2 posterior or prior)
-        gen_latents, _, means2, log_stds2 = prior_model(
-            inputs=in_latents, batch_size=batch_size
-        )
-
-        cond_latents, cond_features = self.conditional_encoder(conditions)
-        cat_latents = torch.cat([gen_latents, cond_latents], dim=1)
-
-        outputs = self.decoder(
-            inputs=cat_latents, skip_features=cond_features
-        )
-        return (
-            outputs, in_latents, means, log_stds,
-            gen_latents, means2, log_stds2
-        )
-
-
-class Stage2VAE(nn.Module):
-
-    def __init__(
-        self,
-        n_input,
-        n_h_layers,
-        n_h_units,
-        n_latent,
-        relu_leak=0.1,
-        device='cuda'
-    ):
-        super().__init__()
-
-        # track dimensions for decoder
-        n_inputs = []
-
-        modules = []
-        for i in range(n_h_layers): # build encoder
-            modules.append(nn.Linear(n_input, n_h_units))
-            modules.append(nn.LeakyReLU(negative_slope=relu_leak))
-            n_inputs.append(n_input)
-            n_input = n_h_units
-
-        self.encoder = nn.Sequential(*modules)
-
-        # variational latent space
-        self.fc_mean = nn.Linear(n_input, n_latent)
-        self.fc_log_std = nn.Linear(n_input, n_latent)
-
-        modules = [ # decoder input fc
-            nn.Linear(n_latent, n_input),
-            nn.LeakyReLU(negative_slope=relu_leak)
-        ]
-
-        for n_output in reversed(n_inputs): # build decoder
-            modules.append(nn.Linear(n_input, n_output))
-            modules.append(nn.LeakyReLU(negative_slope=relu_leak))
-            n_input = n_output
-
-        self.decoder = nn.Sequential(*modules)
-
-        self.n_latent = n_latent
-        self.device = device
-
-    def forward(self, inputs=None, batch_size=None):
-
-        if inputs is None: # prior
-            means, log_stds = None, None
-
-        else: # posterior
-            enc_outputs = self.encoder(inputs)
-            means = self.fc_mean(enc_outputs)
-            log_stds = self.fc_log_std(enc_outputs)
-
-        var_latents = self.sample_latent(batch_size, means, log_stds)
-        outputs = self.decoder(var_latents)
-        return outputs, var_latents, means, log_stds
-
-    def sample_latent(
-        self, batch_size, means=None, log_stds=None, **kwargs
-    ):
-        return sample_latent(
-            batch_size=batch_size,
-            n_latent=self.n_latent,
-            means=means,
-            log_stds=log_stds,
-            device=self.device,
-            **kwargs
-        )
