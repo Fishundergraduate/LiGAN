@@ -160,10 +160,9 @@ class GenerativeSolver(nn.Module):
         **gen_model_kws
     ):
         self.gen_model = self.gen_model_type(
-            n_channels_in=self.n_channels_in,
-            n_channels_cond=self.n_channels_cond,
-            n_channels_out=self.n_channels_out,
-            grid_size=self.train_data.grid_size,
+            n_channels_in=36,#self.n_channels_in,
+            n_channels_cond=36,#self.n_channels_cond,
+            n_channels_out=36,#self.n_channels_out,
             device=device,
             **gen_model_kws
         )
@@ -590,7 +589,7 @@ class GenerativeSolver(nn.Module):
         t0 = time.time()
 
         # forward pass
-        loss, metrics = self.gen_forward(self.train_data, grid_type)
+        loss, metrics = self.gen_forward(self.train_dataLoader, grid_type)
 
         if self.sync_cuda:
             torch.cuda.synchronize()

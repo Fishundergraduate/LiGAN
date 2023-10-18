@@ -49,21 +49,39 @@ def makePocketDatapipe(datarootDir:str):
         'profilePath': ".".join(x.split(".")[:-1])+".profile", # change extension to .profile
         'popsPath':x
     })
+    __lig__pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=True)
+    __lig__pipe = __lig__pipe.filter(filter_fn=lambda x: x.endwith("sdf"))
+    __lig__pipe = __lig__pipe.map(lambda x:{
+        'pockID' : x.split("/")[-1][:4],#Key index
+        'ligPath': x
+    })
+
+    #TODO sdf -> molGraph
+
     pipe = __pock_pipe.zip_with_iter(
         __prot_pipe,
         key_fn=lambda x: x['pockID'],
         ref_key_fn=lambda x:x['pockID'],
         merge_fn=lambda x,y:dict(x, **y)
     )
-    pipe = pipe.map(lambda x: gs(mol_path=x['pockPath'],
+
+    pipe = pipe.zip_with_iter(
+        __lig__pipe,
+        key_fn=lambda x: x['pockID'],
+        ref_key_fn=lambda x:x['pockID'],
+        merge_fn=lambda x,y:dict(x, **y)
+    )
+    pipe = pipe.map(lambda x: {
+        "proteinGraph":gs(mol_path=x['pockPath'],
                                  profile_path=x['profilePath'],
-                                 pop_path=x['popsPath']))
+                                 pop_path=x['popsPath']),
+        "LigandGraph":x['ligPath']})
     pipe = pipe
     return pipe
 
 def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
     __mySplitter=__split_train_test(train_ratio=train_ratio)
-    __train_pipe, __test_pipe = makePocketDatapipe(datarootDir=datarootDir).demux(num_instances=3, classifier_fn=__mySplitter)
+    __train_pipe, __test_pipe = makePocketDatapipe(datarootDir=datarootDir).enumerate().demux(num_instances=2, classifier_fn=__mySplitter)
     return DataLoader(__train_pipe,batch_size=batch_size,shuffle=True), DataLoader(__test_pipe, batch_size)
 
 class MolDataset(utils.data.IterableDataset):

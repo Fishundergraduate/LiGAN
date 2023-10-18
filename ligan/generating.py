@@ -27,8 +27,6 @@ class MoleculeGenerator(object):
     '''
     # subclasses override these class attributes
     gen_model_type = None
-    has_disc_model = False # not used...
-    has_prior_model = False
     has_complex_input = False
 
     def __init__(
@@ -165,15 +163,6 @@ class MoleculeGenerator(object):
     @property
     def n_channels_out(self):
         return self.data.n_lig_channels
-
-    @property
-    def n_channels_disc(self):
-        if self.has_disc_model:
-            data = self.data
-            if self.gen_model_type.has_conditional_encoder:
-                return data.n_rec_channels + data.n_lig_channels
-            else:
-                return data.n_lig_channels
 
     def forward(
         self,
@@ -569,55 +558,9 @@ class MoleculeGenerator(object):
 
         return self.out_writer.metrics
 
-
-class AEGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.AE
-
-
-class VAEGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.VAE
-
-
-class CEGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.CE
-
-
 class CVAEGenerator(MoleculeGenerator):
     gen_model_type = ligan.models.CVAE
     has_complex_input = True
-
-
-class GANGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.GAN
-    has_disc_model = True
-
-
-class CGANGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.CGAN
-    has_disc_model = True
-
-
-class VAEGANGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.VAE
-    has_disc_model = True
-
-
-class CVAEGANGenerator(MoleculeGenerator):
-    gen_model_type = ligan.models.CVAE
-    has_complex_input = True
-    has_disc_model = True
-
-
-class VAE2Generator(MoleculeGenerator):
-    gen_model_type = ligan.models.VAE2
-    has_prior_model = True
-
-
-class CVAE2Generator(MoleculeGenerator):
-    gen_model_type = ligan.models.CVAE2
-    has_complex_input = True
-    has_prior_model = True
-
 
 
 class OutputWriter(object):
