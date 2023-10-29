@@ -4,6 +4,7 @@ channels:
   - nvidia
   - conda-forge
   - gnina
+  - pyg
 dependencies:
   - gxx=10
   - zlib
@@ -23,6 +24,7 @@ dependencies:
   - torchaudio
   - torchdata
   - pytorch-cuda=11.8
+  - pyg # pytorch_geoemtric
   - pytest
   - psutil
   - pynvml
