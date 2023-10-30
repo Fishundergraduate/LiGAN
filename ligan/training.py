@@ -637,7 +637,7 @@ class GenerativeSolver(nn.Module):
 
             grid_type = self.get_gen_grid_phase(i, test=True)
             loss, metrics = self.gen_forward(
-                data=self.test_data,
+                data=self.test_dataLoader,
                 grid_type=grid_type,
                 fit_atoms=fit_atoms
             )
