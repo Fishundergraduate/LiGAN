@@ -612,7 +612,7 @@ def create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x_smi
     
     x_smiles = smiles SMILES strings
     y = y numerial labels for the SMILES strings (such as associated pKi values)
-    
+    TODO: y should be QED value from rdkit
     Outputs:
     
     data_list = G torch_geometric.data.Data objects which represent labeled molecular graphs that can readily be used for machine learning
