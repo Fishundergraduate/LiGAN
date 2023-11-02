@@ -405,6 +405,10 @@ class GenerativeSolver(nn.Module):
         compute_stage2_loss = posterior
 
         t0 = time.time()
+        for it in data:
+            import pdb
+            back = it.forward()
+            pdb.set_trace()
         if posterior or has_cond: # get real examples
             input_grids, cond_grids, input_structs, cond_structs, _, _ = \
                 data.forward()
@@ -637,7 +641,7 @@ class GenerativeSolver(nn.Module):
 
             grid_type = self.get_gen_grid_phase(i, test=True)
             loss, metrics = self.gen_forward(
-                data=self.test_data,
+                data=self.test_dataLoader,
                 grid_type=grid_type,
                 fit_atoms=fit_atoms
             )
