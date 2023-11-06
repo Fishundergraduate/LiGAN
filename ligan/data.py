@@ -50,11 +50,20 @@ def makePocketDatapipe(datarootDir:str):
         'popsPath':x
     })
     __lig__pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=True)
-    __lig__pipe = __lig__pipe.filter(filter_fn=lambda x: x.endwith("sdf"))
+    __lig__pipe = __lig__pipe.filter(filter_fn=lambda x: x.endswith("sdf"))
     __lig__pipe = __lig__pipe.map(lambda x:{
         'pockID' : x.split("/")[-1][:4],#Key index
         'ligPath': x
     })
+    __lig__pipe = __lig__pipe.map(lambda x:{
+        'pockID' : x['pockID'],
+        'ligSMI': convert_to_smiles(x['ligPath'])
+    })
+    __lig__pipe = __lig__pipe.map(lambda x:{
+        'pockID' : x['pockID'],
+        'ligGraph': create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x['ligSMI'])
+    })
+    
 
     #TODO sdf -> molGraph
 
@@ -75,7 +84,7 @@ def makePocketDatapipe(datarootDir:str):
         "proteinGraph":gs(mol_path=x['pockPath'],
                                  profile_path=x['profilePath'],
                                  pop_path=x['popsPath']),
-        "LigandGraph":x['ligPath']})
+        "LigandGraph":x['ligGraph']})
     pipe = pipe
     return pipe
 
@@ -596,3 +605,58 @@ def create_pytorch_geometric_graph_data_list_from_smiles_and_labels(x_smiles, y)
         # construct Pytorch Geometric data object and append to data list
         data_list.append(Data(x = X, edge_index = E, edge_attr = EF, y = y_tensor))
     return data_list
+
+def create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x_smiles, y=0.0):
+    """
+    Inputs:
+    
+    x_smiles = smiles SMILES strings
+    y = y numerial labels for the SMILES strings (such as associated pKi values)
+    TODO: y should be QED value from rdkit
+    Outputs:
+    
+    data_list = G torch_geometric.data.Data objects which represent labeled molecular graphs that can readily be used for machine learning
+    
+    """
+    # convert SMILES to RDKit mol object
+    mol = Chem.MolFromSmiles(x_smiles)
+    # get feature dimensions
+    n_nodes = mol.GetNumAtoms()
+    n_edges = 2*mol.GetNumBonds()
+    unrelated_smiles = "O=O"
+    unrelated_mol = Chem.MolFromSmiles(unrelated_smiles)
+    n_node_features = len(get_atom_features(unrelated_mol.GetAtomWithIdx(0)))
+    n_edge_features = len(get_bond_features(unrelated_mol.GetBondBetweenAtoms(0,1)))
+    # construct node feature matrix X of shape (n_nodes, n_node_features)
+    X = np.zeros((n_nodes, n_node_features))
+    for atom in mol.GetAtoms():
+        X[atom.GetIdx(), :] = get_atom_features(atom)
+        
+    X = torch.tensor(X, dtype = torch.float)
+    
+    # construct edge index array E of shape (2, n_edges)
+    (rows, cols) = np.nonzero(GetAdjacencyMatrix(mol))
+    torch_rows = torch.from_numpy(rows.astype(np.int64)).to(torch.long)
+    torch_cols = torch.from_numpy(cols.astype(np.int64)).to(torch.long)
+    E = torch.stack([torch_rows, torch_cols], dim = 0)
+    
+    # construct edge feature array EF of shape (n_edges, n_edge_features)
+    EF = np.zeros((n_edges, n_edge_features))
+    
+    for (k, (i,j)) in enumerate(zip(rows, cols)):
+        
+        EF[k] = get_bond_features(mol.GetBondBetweenAtoms(int(i),int(j)))
+    
+    EF = torch.tensor(EF, dtype = torch.float)
+    
+    # construct label tensor
+    y_tensor = torch.tensor(np.array([y]), dtype = torch.float)
+    
+    # construct Pytorch Geometric data object and append to data list
+    return Data(x = X, edge_index = E, edge_attr = EF, y = y_tensor)
+
+def convert_to_smiles(input_sdf)->str:
+    # Create a molecule object from the input file
+    suppl = Chem.SDMolSupplier(input_sdf)
+    mols = [x for x in suppl if x is not None]
+    return Chem.MolToSmiles(mols[0])
