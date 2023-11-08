@@ -4,7 +4,7 @@ from scipy import stats
 import torch
 from torch import nn
 from .interpolation import Interpolation
-
+from torch_geometric.nn import GCNConv
 
 # mapping of unpool_types to Upsample modes
 unpool_type_map = dict(

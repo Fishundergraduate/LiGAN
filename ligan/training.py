@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from torch import nn, optim
 torch.backends.cudnn.benchmark = True
-
+from torch import utils
 try:
     import wandb
 except ImportError:
@@ -145,13 +145,16 @@ class GenerativeSolver(nn.Module):
         
 
     def init_data(self, device, train_file, test_file, **data_kws):
-        self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=data_kws['batch_size'], train_ratio=data_kws['train_ratio'])
+        #self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=data_kws['batch_size'], train_ratio=data_kws['train_ratio'])
+        #self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=10**6, train_ratio=data_kws['train_ratio'])
         """ self.train_data = \
             data.AtomGridData(device=device, data_file=train_file, **data_kws)
         self.test_data = \
             data.AtomGridData(device=device, data_file=test_file, **data_kws) """
-        self.train_data = None
-        self.test_data=None
+        __ds = data.biDataset(train_file)
+        train_size = int(len(__ds)*0.8)
+        test_size = len(__ds) - train_size
+        self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size])
     def init_gen_model(
         self,
         device,
@@ -406,9 +409,7 @@ class GenerativeSolver(nn.Module):
 
         t0 = time.time()
         for it in data:
-            import pdb
             back = it.forward()
-            pdb.set_trace()
         if posterior or has_cond: # get real examples
             input_grids, cond_grids, input_structs, cond_structs, _, _ = \
                 data.forward()
@@ -593,7 +594,7 @@ class GenerativeSolver(nn.Module):
         t0 = time.time()
 
         # forward pass
-        loss, metrics = self.gen_forward(self.train_dataLoader, grid_type)
+        loss, metrics = self.gen_forward(self.train_data, grid_type)
 
         if self.sync_cuda:
             torch.cuda.synchronize()
@@ -641,7 +642,7 @@ class GenerativeSolver(nn.Module):
 
             grid_type = self.get_gen_grid_phase(i, test=True)
             loss, metrics = self.gen_forward(
-                data=self.test_dataLoader,
+                data=self.test_data,
                 grid_type=grid_type,
                 fit_atoms=fit_atoms
             )

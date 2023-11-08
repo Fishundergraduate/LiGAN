@@ -3,12 +3,20 @@ from numpy import isclose
 os.environ['GLOG_minloglevel'] = '1'
 
 sys.path.insert(0, '.')
-from ligan.data import molgrid, MolDataset, AtomGridData, makePocketDatapipe
+from ligan.data import molgrid, MolDataset, AtomGridData, makePocketDatapipe, biDataset
 from ligan.atom_types import AtomTyper
 from ligan.atom_structs import AtomStruct
 
 
 batch_size = 10
+
+def test_data():
+    dataset = biDataset("/mnt/d/Documents_2023/data")
+    for i,d in enumerate(dataset):
+        print(i,d)
+        if i > 10:
+            break
+    assert True
 
 def test_makePocketDatapipe():
     pipe = makePocketDatapipe("/mnt/d/Documents_2023/data")
