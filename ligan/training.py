@@ -409,7 +409,7 @@ class GenerativeSolver(nn.Module):
 
         t0 = time.time()
         for it in data:
-            back = it.forward()
+            back = self.gen_model.forward(it[0],it[1])
         if posterior or has_cond: # get real examples
             input_grids, cond_grids, input_structs, cond_structs, _, _ = \
                 data.forward()

@@ -1,4 +1,6 @@
 import sys
+
+from git import Object
 import numpy as np
 from scipy import stats
 import torch
@@ -151,7 +153,7 @@ class Conv2dReLU(nn.Sequential):
     Spectral normalization is applied by indicating
     the number of power iterations (spectral_norm).
     '''
-    conv_type = nn.Conv2d
+    conv_type = GCNConv
 
     def __init__(
         self,
@@ -166,8 +168,6 @@ class Conv2dReLU(nn.Sequential):
             self.conv_type(
                 in_channels=n_channels_in,
                 out_channels=n_channels_out,
-                kernel_size=kernel_size,
-                padding=kernel_size//2,
             ),
             nn.LeakyReLU(
                 negative_slope=relu_leak,
@@ -256,8 +256,6 @@ class Conv2dBlock(nn.Module):
             self.skip_conv = self.conv_type(
                 n_channels_in=n_channels_in,
                 n_channels_out=n_channels_out,
-                kernel_size=1,
-                **kwargs
             )
         else:
             self.skip_conv = nn.Identity()
@@ -490,6 +488,30 @@ class Grid2Vec(nn.Sequential):
 
         super().__init__(*modules)
 
+class Graph2Vec(nn.Sequential):
+    def __init__(self, in_shape, n_output, activ_fn=None, spectral_norm=0):
+        n_input = int(np.prod(in_shape))
+        modules = [
+            GCNConv(n_input, n_output)
+        ]
+
+        if activ_fn:
+            modules.append(activ_fn)
+
+        super().__init__(*modules)
+
+class Vec2Graph(nn.Sequential):
+    def __init__(self, n_input, out_shape, relu_leak, batch_norm, spectral_norm):
+        n_output = int(np.prod(out_shape))
+        modules = [
+            GCNConv(n_input, n_output),
+            nn.LeakyReLU(negative_slope=relu_leak, inplace=True),
+        ]
+
+        if batch_norm > 0:
+            modules.insert(batch_norm+1, nn.BatchNorm2d(out_shape[0]))
+
+        super().__init__(*modules)
 
 class Vec2Grid(nn.Sequential):
     '''
@@ -558,7 +580,7 @@ class GridEncoder(nn.Module):
         # track changing grid dimensions
         self.n_channels = n_channels
 
-        if init_conv_pool:
+        """ if init_conv_pool:
 
             self.add_conv2d(
                 name='init_conv',
@@ -573,7 +595,7 @@ class GridEncoder(nn.Module):
                 pool_type=pool_type,
                 pool_factor=pool_factor
             )
-            n_filters *= width_factor
+            n_filters *= width_factor """
 
         for i in range(n_levels):
 
@@ -658,7 +680,8 @@ class GridEncoder(nn.Module):
         self.print(name, self.n_channels)
 
     def add_grid2vec(self, name, **kwargs):
-        fc = Grid2Vec(
+        #fc = Grid2Vec(
+        fc = Graph2Vec(
             in_shape=(self.n_channels,),
             **kwargs
         )
@@ -810,7 +833,7 @@ class GridDecoder(nn.Module):
             print('DEBUG', *args, **kwargs, file=sys.stderr)
 
     def add_vec2grid(self, name, n_channels, **kwargs):
-        vec2grid = Vec2Grid(
+        vec2grid = Vec2Graph(
             out_shape=(n_channels,),
             **kwargs
         )
@@ -1070,3 +1093,11 @@ class CVAE(GridGenerator):
             inputs=cat_latents, skip_features=cond_features
         )
         return outputs, in_latents, means, log_stds
+
+""" class CVAE2(nn.Module):
+    def __init__(self, in_channel, out_channel) -> None:
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+
+        self.conv1 = GCNConv(in_channel, 2*out_channel) """

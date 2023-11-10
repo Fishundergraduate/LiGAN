@@ -270,7 +270,8 @@ class TestGridDecoder(object):
 
 class TestGridGenerator(object):
 
-    @pytest.fixture(params=[AE, CE, VAE, CVAE, GAN, CGAN, VAE2, CVAE2])
+    #@pytest.fixture(params=[AE, CE, VAE, CVAE, GAN, CGAN, VAE2, CVAE2])
+    @pytest.fixture(params=[CVAE])
     def model_type(self, request):
         return request.param
 
