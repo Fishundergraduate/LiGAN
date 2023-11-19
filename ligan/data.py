@@ -11,16 +11,17 @@ from .interpolation import TransformInterpolation
 # import packages
 # general tools
 import numpy as np
-# RDkit
-from rdkit import Chem
-import numpy as np
 from rdkit.Chem.rdmolops import GetAdjacencyMatrix
 # Pytorch and Pytorch Geometric
 from torch_geometric.data import Data
 from torch.utils.data import DataLoader
 from graphsite import Graphsite
 from torchdata import datapipes
+from glob import glob
+from rdkit import RDLogger, Chem
 
+# RDKitのエラーメッセージを無効にする
+RDLogger.DisableLog('rdApp.*')
 gs = Graphsite()
 
 def __split_train_test(train_ratio=0.9):
@@ -34,23 +35,23 @@ def makePocketDatapipe(datarootDir:str):
         |--protein-data-part1
         |--protein-data-part2
     """
-    __pock_pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=True)
-    __pock_pipe = __pock_pipe.filter(filter_fn=lambda x: x.endswith("mol2"))
+    __pock_pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=False)
+    __pock_pipe = __pock_pipe.filter(filter_fn=lambda x: x.endswith("00.mol2"))
     __pock_pipe = __pock_pipe.map(lambda x:{
         'pockID' : x.split("/")[-1][:5],#Key index
         'pockPath': x
     })
-    __prot_pipe_1 = datapipes.iter.FileLister(datarootDir+"/protein-data-part1",recursive=True)
-    __prot_pipe_2 = datapipes.iter.FileLister(datarootDir+"/protein-data-part2",recursive=True)
+    __prot_pipe_1 = datapipes.iter.FileLister(datarootDir+"/protein-data-part1",recursive=False)
+    __prot_pipe_2 = datapipes.iter.FileLister(datarootDir+"/protein-data-part2",recursive=False)
     __prot_pipe = __prot_pipe_1.concat(__prot_pipe_2)
     __prot_pipe = __prot_pipe.filter(filter_fn=lambda x: x.endswith("pops"))
     __prot_pipe = __prot_pipe.map(lambda x:{
-        'pockID': x.split("/")[-2],
+        'pockID__prot': x.split("/")[-2],
         'profilePath': ".".join(x.split(".")[:-1])+".profile", # change extension to .profile
         'popsPath':x
     })
-    __lig__pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=True)
-    __lig__pipe = __lig__pipe.filter(filter_fn=lambda x: x.endswith("sdf"))
+    __lig__pipe = datapipes.iter.FileLister(datarootDir+"/pocket-data",recursive=False)
+    __lig__pipe = __lig__pipe.filter(filter_fn=lambda x: x.endswith("00.sdf"))
     __lig__pipe = __lig__pipe.map(lambda x:{
         'pockID' : x.split("/")[-1][:4],#Key index
         'ligPath': x
@@ -60,7 +61,7 @@ def makePocketDatapipe(datarootDir:str):
         'ligSMI': convert_to_smiles(x['ligPath'])
     })
     __lig__pipe = __lig__pipe.map(lambda x:{
-        'pockID' : x['pockID'],
+        'pockID__lig' : x['pockID'],
         'ligGraph': create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x['ligSMI'])
     })
     
@@ -70,28 +71,62 @@ def makePocketDatapipe(datarootDir:str):
     pipe = __pock_pipe.zip_with_iter(
         __prot_pipe,
         key_fn=lambda x: x['pockID'],
-        ref_key_fn=lambda x:x['pockID'],
-        merge_fn=lambda x,y:dict(x, **y)
+        ref_key_fn=lambda x:x['pockID__prot'],
+        merge_fn=lambda x,y:dict(x, **y),
+        keep_key=False
     )
 
     pipe = pipe.zip_with_iter(
         __lig__pipe,
-        key_fn=lambda x: x['pockID'],
-        ref_key_fn=lambda x:x['pockID'],
-        merge_fn=lambda x,y:dict(x, **y)
+        key_fn=lambda x: x['pockID'],#dict
+        ref_key_fn=lambda x:x['pockID__lig'],
+        merge_fn=lambda x,y:dict(x, **y),
+        keep_key=False
     )
     pipe = pipe.map(lambda x: {
         "proteinGraph":gs(mol_path=x['pockPath'],
                                  profile_path=x['profilePath'],
                                  pop_path=x['popsPath']),
         "LigandGraph":x['ligGraph']})
-    pipe = pipe
     return pipe
 
 def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
     __mySplitter=__split_train_test(train_ratio=train_ratio)
     __train_pipe, __test_pipe = makePocketDatapipe(datarootDir=datarootDir).enumerate().demux(num_instances=2, classifier_fn=__mySplitter)
-    return DataLoader(__train_pipe,batch_size=batch_size,shuffle=True), DataLoader(__test_pipe, batch_size)
+    return DataLoader(__train_pipe,batch_size=batch_size,shuffle=False), DataLoader(__test_pipe, batch_size)
+
+class biDataset(utils.data.Dataset):
+    def __init__(self, datarootDir:str):
+        pock_path = glob(datarootDir+"/pocket-data/*00")
+        pockID = [x.split("/")[-1][:5] for x in pock_path]
+        mol2_path = [x+"/"+x.split("/")[-1]+".mol2" for x in pock_path]
+        __sdf_path = [x.split(".")[0]+".sdf" for x in mol2_path]
+        lig_smi = [convert_to_smiles(x) for x in __sdf_path] # Nullable List
+        dataA = pd.DataFrame({"pockID":pockID,"mol2_path":mol2_path,"lig_smi":lig_smi})
+
+
+        prot_path = glob(datarootDir+"/protein-data-part1/*")+glob(datarootDir+"/protein-data-part2/*")
+        protID = [x.split("/")[-1] for x in prot_path]
+        profile_path = [x+"/"+x.split("/")[-1]+".profile" for x in prot_path]
+        pops_path = [x.split(".")[0]+".pops" for x in profile_path]
+        dataB = pd.DataFrame({"protID":protID,"profile_path":profile_path,"pops_path":pops_path})
+        # DataFrameを結合
+        merged_data = pd.merge(dataA, dataB, left_on='pockID', right_on='protID')
+        merged_data = merged_data.dropna()
+        merged_data = merged_data.drop(columns=['pockID','protID'])
+        self.data = merged_data
+        #lig_graph = [create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x) for x in lig_smi]
+        #prot_graph = [gs(mol_path=mol2path,profile_path=profilepath,pop_path=popspath) for mol2path,profilepath,popspath in zip(mol2_path,profile_path,pops_path)]
+
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        lig_graph = create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
+        node,edge,attr = gs(mol_path=self.data.iloc[idx]['mol2_path'],profile_path=self.data.iloc[idx]['profile_path'],pop_path=self.data.iloc[idx]['pops_path'])
+        prot_graph = Data(x=node,edge_index=edge,edge_attr=attr)#,y=torch.tensor([0.0]))
+        return prot_graph, lig_graph
+
 
 class MolDataset(utils.data.IterableDataset):
 
@@ -618,6 +653,8 @@ def create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x_smi
     data_list = G torch_geometric.data.Data objects which represent labeled molecular graphs that can readily be used for machine learning
     
     """
+    if x_smiles is None:
+        return None
     # convert SMILES to RDKit mol object
     mol = Chem.MolFromSmiles(x_smiles)
     # get feature dimensions
@@ -659,4 +696,4 @@ def convert_to_smiles(input_sdf)->str:
     # Create a molecule object from the input file
     suppl = Chem.SDMolSupplier(input_sdf)
     mols = [x for x in suppl if x is not None]
-    return Chem.MolToSmiles(mols[0])
+    return Chem.MolToSmiles(mols[0]) if len(mols)!=0 else None
