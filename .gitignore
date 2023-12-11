@@ -1,4 +1,3 @@
 tests/output/*
 data/crossdock2020/*
 *.pyc
-wandb*

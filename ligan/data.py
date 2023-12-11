@@ -1,9 +1,8 @@
-import imp
 import sys, os, re, time
 import pandas as pd
 from openbabel import openbabel as ob
 import torch
-from torch import Tensor, nn, tensor, utils
+from torch import nn, utils
 
 import molgrid
 from . import atom_types, atom_structs, atom_grids
@@ -21,7 +20,6 @@ from torchdata import datapipes
 from glob import glob
 from rdkit import RDLogger, Chem
 
-from torch_geometric.utils import smiles, dense_to_sparse
 # RDKitのエラーメッセージを無効にする
 RDLogger.DisableLog('rdApp.*')
 gs = Graphsite()
@@ -98,7 +96,7 @@ def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
     return DataLoader(__train_pipe,batch_size=batch_size,shuffle=False), DataLoader(__test_pipe, batch_size)
 
 class biDataset(utils.data.Dataset):
-    def __init__(self, datarootDir:str, device:str="cuda"):
+    def __init__(self, datarootDir:str):
         pock_path = glob(datarootDir+"/pocket-data/*00")
         pockID = [x.split("/")[-1][:5] for x in pock_path]
         mol2_path = [x+"/"+x.split("/")[-1]+".mol2" for x in pock_path]
@@ -119,120 +117,15 @@ class biDataset(utils.data.Dataset):
         self.data = merged_data
         #lig_graph = [create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x) for x in lig_smi]
         #prot_graph = [gs(mol_path=mol2path,profile_path=profilepath,pop_path=popspath) for mol2path,profilepath,popspath in zip(mol2_path,profile_path,pops_path)]
-        self.device = device
-        self.smiles_graph , error_list= self.smiles2graphlist(self.data['lig_smi'])
-        self.data = self.data[~self.data['lig_smi'].isin(error_list)]
-        self.prot_graph, error_list = self.prot2graphlist(self.data['mol2_path'],self.data['profile_path'],self.data['pops_path'])
-        self.data = self.data[~self.data['mol2_path'].isin(error_list)]
 
     def __len__(self):
         return len(self.data)
-    #TODO: data should be located in a list.
-    def __getitem__(self, idx):
-        #lig_graph = create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
-        """ lig_graph = smiles.from_smiles(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
-        lig_graph = Data(x = lig_graph.x.to(torch.float32),
-                         edge_index=lig_graph.edge_index.to(torch.int64),
-                         edge_attr=lig_graph.edge_attr.to(torch.float),
-                         smiles = lig_graph.smiles)
-        node,edge,attr = gs(mol_path=self.data.iloc[idx]['mol2_path'],profile_path=self.data.iloc[idx]['profile_path'],pop_path=self.data.iloc[idx]['pops_path'])
-        prot_graph = Data(
-            x=torch.from_numpy(node).to(torch.float32),
-            edge_index=torch.from_numpy(edge).to(torch.long),
-            edge_attr=torch.from_numpy(attr).to(torch.float32),
-            y=torch.tensor([0.0]).to(torch.float32))
-        lig_graph = lig_graph.to(self.device)
-        prot_graph = prot_graph.to(self.device) """
-        lig_graph = self.smiles_graph[idx]
-        prot_graph = self.prot_graph[idx]
-
-        return lig_graph, prot_graph 
-
-    def smiles2graphlist(self, smiles_list):
-        """
-        This function takes a list of SMILES strings as input.
-        It then attempts to convert each SMILES string into a graph.
-        If the conversion is successful, the graph is added to the success_list.
-        If the conversion fails (for example, if an invalid SMILES string is provided), the SMILES string is added to the error_list.
-        The function ultimately returns two lists: success_list and error_list.
-        """
-        success_list = list()
-        error_list = list()
-        for smi in smiles_list:
-            try:
-                d = smiles.from_smiles(smi)
-                d = Data(
-                    x=d.x.to(torch.float32),
-                    edge_index=d.edge_index.to(torch.long),
-                    edge_attr=d.edge_attr.to(torch.float32),
-                    smiles = d.smiles)
-                success_list.append(d)
-            except:
-                error_list.append(smi)
-        return success_list, error_list
     
-    def prot2graphlist(self, mol2_path_list, profile_path_list, pops_path_list):
-        """
-        This function takes a list of paths to mol2 files, a list of paths to profile files, and a list of paths to pops files as input.
-        It then attempts to convert each mol2 file, profile file, and pops file into a graph.
-        If the conversion is successful, the graph is added to the success_list.
-        If the conversion fails (for example, if an invalid mol2 file, profile file, or pops file is provided), the paths to the mol2 file, profile file, and pops file are added to the error_list.
-        The function ultimately returns two lists: success_list and error_list.
-        """
-        success_list = list()
-        error_list = list()
-        for mol2_path, profile_path, pops_path in zip(mol2_path_list, profile_path_list, pops_path_list):
-            try:
-                d = gs(mol_path=mol2_path,profile_path=profile_path,pop_path=pops_path)
-                d = Data(
-                    x=torch.from_numpy(d[0]).to(torch.float32),
-                    edge_index=torch.from_numpy(d[1]).to(torch.long),
-                    edge_attr=torch.from_numpy(d[2]).to(torch.float32),
-                    y=torch.tensor([0.0]).to(torch.float32))
-                success_list.append(d)
-            except:
-                error_list.append([mol2_path])
-        return success_list, error_list
-
-@staticmethod
-def convert_to_original_data(data):
-    return Data(
-        x=data.x.to(torch.long),
-        edge_index=data.edge_index.to(torch.long),
-        edge_attr=data.edge_attr.to(torch.long),
-    )
-
-
-@staticmethod
-def convert_to_edge_attr(adj_matrix:Tensor):
-    assert adj_matrix.shape[-1] == 3, "adj_matrix should be 3D tensor"
-    edge_bondtype = dense_to_sparse(adj_matrix[:,:,0])
-    edge_stereomer = dense_to_sparse(adj_matrix[:,:,1])
-    edge_conjugated = dense_to_sparse(adj_matrix[:,:,2])
-
-    edge_attr_stereo = torch.zeros_like(edge_bondtype[1])
-    edge_attr_conjugated = torch.zeros_like(edge_bondtype[1])
-
-    if edge_stereomer[0].shape[-1] > 0:
-        for i in range(edge_stereomer[0].shape[-1]):
-            mask = (edge_bondtype[0][0] == edge_stereomer[0][0][i]) & (edge_bondtype[0][1] == edge_stereomer[0][1][i])
-            mask_list = mask.nonzero(as_tuple=True)[0].tolist()
-            for idx in mask_list:
-                edge_attr_stereo[idx] = edge_stereomer[1][i]
-    if edge_conjugated[0].shape[-1] > 0:
-        for i in range(edge_conjugated[0].shape[-1]):
-            mask = (edge_bondtype[0][0] == edge_conjugated[0][0][i]) & (edge_bondtype[0][1] == edge_conjugated[0][1][i])
-            mask_list = mask.nonzero(as_tuple=True)[0].tolist()
-            for idx in mask_list:
-                edge_attr_conjugated[idx] = edge_conjugated[1][i]
-    edge_attr = torch.stack([
-        edge_bondtype[1],
-        edge_attr_stereo,
-        edge_attr_conjugated
-    ])
-    return edge_bondtype[0], edge_attr.T
-
-
+    def __getitem__(self, idx):
+        lig_graph = create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
+        node,edge,attr = gs(mol_path=self.data.iloc[idx]['mol2_path'],profile_path=self.data.iloc[idx]['profile_path'],pop_path=self.data.iloc[idx]['pops_path'])
+        prot_graph = Data(x=node,edge_index=edge,edge_attr=attr)#,y=torch.tensor([0.0]))
+        return prot_graph, lig_graph
 
 
 class MolDataset(utils.data.IterableDataset):
@@ -804,22 +697,3 @@ def convert_to_smiles(input_sdf)->str:
     suppl = Chem.SDMolSupplier(input_sdf)
     mols = [x for x in suppl if x is not None]
     return Chem.MolToSmiles(mols[0]) if len(mols)!=0 else None
-
-def extract_options_from_sdf(sdf_file_path)->list[float]:
-    # SDFファイルを読み込む
-    supplier = Chem.SDMolSupplier(sdf_file_path)
-
-    options_list = []
-
-    # 各分子の情報を抽出
-    for mol in supplier:
-        if mol is not None:
-            # 分子の全てのプロパティを取得
-            options = {}
-            for prop_name in mol.GetPropNames():
-                prop_value = mol.GetProp(prop_name)
-                options[prop_name] = prop_value
-
-            options_list.append(options)
-
-    return options_list
