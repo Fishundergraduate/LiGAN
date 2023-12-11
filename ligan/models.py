@@ -1,13 +1,18 @@
 import sys
+from turtle import forward
 
 from git import Object
+import torch_geometric
 import numpy as np
 from scipy import stats
 import torch
 from torch import nn
-from .interpolation import Interpolation
-from torch_geometric.nn import GCNConv
+from torch.nn import functional as F
 
+from zmq import device
+from .interpolation import Interpolation
+from torch_geometric.nn import GATConv, pool, GCNConv
+from torch_geometric.data import Data, Batch
 # mapping of unpool_types to Upsample modes
 unpool_type_map = dict(
     n='nearest',
@@ -153,7 +158,7 @@ class Conv2dReLU(nn.Sequential):
     Spectral normalization is applied by indicating
     the number of power iterations (spectral_norm).
     '''
-    conv_type = GCNConv
+    conv_type = GATConv
 
     def __init__(
         self,
@@ -164,7 +169,7 @@ class Conv2dReLU(nn.Sequential):
         batch_norm=False,
         spectral_norm=False,
     ):
-        modules = [
+        self.modules = [
             self.conv_type(
                 in_channels=n_channels_in,
                 out_channels=n_channels_out,
@@ -176,15 +181,19 @@ class Conv2dReLU(nn.Sequential):
         ]
 
         if batch_norm > 0: # value indicates order wrt conv and relu
-            modules.insert(batch_norm, nn.BatchNorm2d(n_channels_out))
+            self.modules.insert(batch_norm, nn.BatchNorm2d(n_channels_out))
 
         if spectral_norm > 0: # value indicates num power iterations
-            modules[0] = nn.utils.spectral_norm(
-                modules[0], n_power_iterations=spectral_norm
+            self.modules[0].lin_src = nn.utils.spectral_norm(
+                self.modules[0].lin_src, n_power_iterations=spectral_norm
             )
 
-        super().__init__(*modules)
-
+        super().__init__(*(self.modules))
+    
+    def forward(self, data):
+        x = self.modules[0](data.x,data.edge_index,data.edge_attr)
+        x = self.modules[1](x)
+        return Data(x=x, edge_index=data.edge_index, edge_attr=data.edge_attr, y = data.y)
 
 class TConv2dReLU(Conv2dReLU):
     '''
@@ -196,7 +205,8 @@ class TConv2dReLU(Conv2dReLU):
     Spectral normalization is applied by indicating
     the number of power iterations (spectral_norm).
     '''
-    conv_type = nn.ConvTranspose2d
+    #TODO: transpose convolution
+    conv_type = GATConv
 
 
 class Conv2dBlock(nn.Module):
@@ -357,7 +367,8 @@ class Conv2dBlock(nn.Module):
             
             if self.residual:
                 identity = self.skip_conv(inputs) if i == 0 else inputs
-                outputs = f(inputs) + identity
+                outputs = f(inputs)
+                outputs.x = outputs.x + identity.x
             else:
                 outputs = f(inputs)
 
@@ -424,7 +435,7 @@ class Unpool2d(nn.Sequential):
     transposed convolution (unpool_type=c).
     '''
     def __init__(self, n_channels, unpool_type, unpool_factor):
-
+        """ import ipdb; ipdb.set_trace()
         if unpool_type in unpool_type_map:
             
             unpool = nn.Upsample(
@@ -443,10 +454,16 @@ class Unpool2d(nn.Sequential):
             )
 
         else:
-            raise ValueError('unknown unpool_type ' + repr(unpool_type))
+            raise ValueError('unknown unpool_type ' + repr(unpool_type)) """
+        super().__init__()
+        self.unpool = GCNConv(n_channels, n_channels)
 
-        super().__init__(unpool)
 
+    def forward(self, input: Data):
+        return Data(x = self.unpool.forward(input.x, input.edge_index),
+                    edge_index = input.edge_index,
+                    edge_attr = input.edge_attr,
+                    y = input.y)
 
 class Reshape(nn.Module):
     '''
@@ -488,30 +505,38 @@ class Grid2Vec(nn.Sequential):
 
         super().__init__(*modules)
 
-class Graph2Vec(nn.Sequential):
+class Graph2Vec(nn.Module):
     def __init__(self, in_shape, n_output, activ_fn=None, spectral_norm=0):
+        super().__init__()
         n_input = int(np.prod(in_shape))
-        modules = [
-            GCNConv(n_input, n_output)
-        ]
+        self.gcn = GATConv(n_input, n_output)
+        self.activ_fn = activ_fn 
 
-        if activ_fn:
-            modules.append(activ_fn)
-
-        super().__init__(*modules)
-
+    def forward(self, data:Data):
+        __mean = self.gcn(data.x,data.edge_index,data.edge_attr)
+        __mean = torch.mean(__mean, dim=0, keepdim=True)
+        if self.activ_fn:
+            __mean = self.activ_fn(__mean.to("cuda"), data.edge_index)
+        return Data(x=__mean, edge_index=data.edge_index, edge_attr=data.edge_attr, y = data.y)
 class Vec2Graph(nn.Sequential):
     def __init__(self, n_input, out_shape, relu_leak, batch_norm, spectral_norm):
+        super().__init__()
         n_output = int(np.prod(out_shape))
-        modules = [
-            GCNConv(n_input, n_output),
-            nn.LeakyReLU(negative_slope=relu_leak, inplace=True),
-        ]
-
+        self.gcn = GATConv(n_input, n_output)
+        self.relu = nn.LeakyReLU(negative_slope=relu_leak, inplace=True)
+        
         if batch_norm > 0:
-            modules.insert(batch_norm+1, nn.BatchNorm2d(out_shape[0]))
-
-        super().__init__(*modules)
+            self.batch_norm = nn.BatchNorm2d(out_shape[0])
+        else:
+            self.batch_norm = None
+    
+    def forward(self, data:Data):
+        __tensor = data.x.expand(torch.max(data.edge_index).item()+1, -1).to(data.device)
+        x = self.gcn(__tensor,data.edge_index,data.edge_attr)
+        x = self.relu(x)
+        if self.batch_norm:
+            x = self.batch_norm(x)
+        return Data(x=x, edge_index=data.edge_index, edge_attr=data.edge_attr, y = data.y)
 
 class Vec2Grid(nn.Sequential):
     '''
@@ -632,7 +657,6 @@ class GridEncoder(nn.Module):
 
         self.n_tasks = len(n_output)
         self.task_modules = []
-
         for i, (n_output_i, activ_fn_i) in enumerate(
             zip(n_output, output_activ_fn)
         ):
@@ -690,22 +714,23 @@ class GridEncoder(nn.Module):
         self.print(name, self.n_channels)
 
     def forward(self, inputs):
-
         # conv-pool sequence
         conv_features = []
         for f in self.grid_modules:
-
-            outputs = f(inputs)
-            self.print(inputs.shape, '->', f, '->', outputs.shape)
+            
+            if not isinstance(f, Pool2d):
+                outputs = f(inputs)
+            else:
+                outputs = pool.avg_pool_neighbor_x(inputs) #TODO: add to max_pool_neighbor_x
+            self.print(inputs.x.shape, '->', f, '->', outputs.x.shape)
 
             if not isinstance(f, Pool2d):
                 conv_features.append(outputs)
             inputs = outputs
-
         # fully-connected outputs
         outputs = [f(inputs) for f in self.task_modules]
-        outputs_shape = [o.shape for o in outputs]
-        self.print(inputs.shape, '->', self.task_modules, '->', outputs_shape)
+        #outputs_shape = [o.x.shape for o in outputs]
+        #self.print(inputs.x.shape, '->', self.task_modules, '->', outputs_shape)
 
         return reduce_list(outputs), conv_features
 
@@ -877,24 +902,25 @@ class GridDecoder(nn.Module):
         self.print(name, self.n_channels)
 
     def forward(self, inputs, skip_features=None):
-
         for f in self.fc_modules:
             outputs = f(inputs)
-            self.print(inputs.shape, '->', f, '->', outputs.shape)
+            self.print(inputs.x.shape, '->', f, '->', outputs.x.shape)
             inputs = outputs
 
         for f in self.grid_modules:
 
             if self.skip_connect and isinstance(f, TConv2dBlock):
                 skip_inputs = skip_features.pop()
-                inputs = torch.cat([inputs, skip_inputs], dim=1)
-                inputs_shape = [inputs.shape, skip_inputs.shape]
+                skip_inputs.x = torch.cat([skip_inputs.x, torch.zeros([inputs.x.shape[0] - skip_inputs.x.shape[0] % inputs.x.shape[0], skip_inputs.x.shape[1]], device=inputs.x.device)])
+                skip_inputs.x = skip_inputs.x.view(inputs.x.shape[0], -1, skip_inputs.x.shape[1]).mean(dim=1)
+                inputs.x = torch.cat([inputs.x, skip_inputs.x], dim=1)
+                inputs_shape = [inputs.x.shape, skip_inputs.x.shape]
             else:
-                inputs_shape = inputs.shape
+                inputs_shape = inputs.x.shape
 
             outputs = f(inputs)
-            self.print(inputs_shape, '->', f, '->', outputs.shape)
-            inputs = outputs
+            self.print(inputs_shape, '->', f, '->', outputs.x.shape)
+            inputs.x = outputs.x
 
         return outputs
 
@@ -1078,19 +1104,29 @@ class CVAE(GridGenerator):
     has_conditional_encoder = True
 
     def forward(
-        self, inputs=None, conditions=None, batch_size=None, **kwargs
+        self, inputs=None, conditions=None, batch_size=1, **kwargs
     ):
+        if inputs.batch is not None:
+            batch_size = inputs.batch.max().item() + 1
         if inputs is None: # prior
             means, log_stds = None, None
         else: # posterior
             (means, log_stds), _ = self.input_encoder(inputs)
-
-        in_latents = self.sample_latent(batch_size, means, log_stds, **kwargs)
+        in_latents = self.sample_latent(batch_size, means.x, log_stds.x, **kwargs)
         cond_latents, cond_features = self.conditional_encoder(conditions)
-        cat_latents = torch.cat([in_latents, cond_latents], dim=1)
-
+        bach_cond_lat = cond_latents.x.repeat(batch_size, 1)
+        cat_latents = torch.cat([in_latents, bach_cond_lat], dim=1)
+        batch_inds = torch.arange(batch_size, device=self.device)
+        num_nodes_list = [inputs[i].num_nodes for i in range(batch_size)]
+        latent_vecs = [cat_latents[i].unsqueeze(0).repeat(num_nodes_list[i], 1) for i in range(batch_size)]
+        #data_list = [Data(x=cat_latents[i].unsqueeze(0), edge_index=inputs.edge_index, edge_attr=inputs.edge_attr, y = inputs.y, batch=batch_inds[i], num_nodes = num_nodes_list[i]) for i in range(batch_size)]
+        stacked_vecs = torch.cat(latent_vecs, dim=0).to(self.device)
+        stacked_data = Data(x=stacked_vecs, edge_index=inputs.edge_index, edge_attr=inputs.edge_attr, y = inputs.y, device=self.device, num_nodes = inputs.num_nodes)
+        #batch_data = Batch.from_data_list(data_list)
+        #batch_data = batch_data.to(self.device)
+        # TODO: batch_expand
         outputs = self.decoder(
-            inputs=cat_latents, skip_features=cond_features
+            inputs=stacked_data, skip_features=cond_features
         )
         return outputs, in_latents, means, log_stds
 
@@ -1100,4 +1136,4 @@ class CVAE(GridGenerator):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-        self.conv1 = GCNConv(in_channel, 2*out_channel) """
+        self.conv1 = GATConv(in_channel, 2*out_channel) """

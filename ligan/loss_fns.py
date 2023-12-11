@@ -282,13 +282,15 @@ def L1_loss(predictions, labels, log_var=0):
     return torch.sum(
         ((labels - predictions) / torch.exp(log_var)).abs() + log_var
     ) / labels.shape[0]
-
+    
 
 def L2_loss(predictions, labels, log_var=0):
     # https://github.com/daib13/TwoStageVAE/blob/master/network/two_stage_vae_model.py#L39
+    if type(log_var) is not torch.Tensor:
+        log_var = torch.tensor(log_var)
     return torch.sum(
-        ((labels - predictions) / torch.exp(log_var))**2 / 2.0 + log_var
-    ) / labels.shape[0]
+        ((labels - predictions) / torch.exp(log_var).to(predictions.device))**2 / 2.0 + log_var.to(predictions.device)
+    ) / torch.tensor(int(labels.shape[0])).to(predictions.device)
 
 
 def wasserstein_loss(predictions, labels):
