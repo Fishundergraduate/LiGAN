@@ -298,3 +298,20 @@ class TestMolDataset(object):
         t_delta = time.time() - t_start
         t_delta /= n_rows
         assert t_delta < 0.05, 'too slow ({:.4f}s / row)'.format(t_delta)
+
+def test_convert_to_edge_attr():
+    from ligan.data import convert_to_edge_attr
+    from torch_geometric.utils import smiles
+    from torch_geometric.utils import to_dense_adj
+    from torch_geometric.data import Data
+    smiles_list = [
+        "c1ccccc1",
+        "O=C(O)/C=C\\C(=O)O"]
+    
+    for smiles_str in smiles_list:
+        smi_tens = smiles.from_smiles(smiles_str)
+        smi_adj = to_dense_adj(smi_tens.edge_index, edge_attr=smi_tens.edge_attr).squeeze(0)
+        edge_index, edge_attr = convert_to_edge_attr(smi_adj)
+        smi_rev = smiles.to_smiles(Data(x = smi_tens.x, edge_index = edge_index, edge_attr = edge_attr))
+        print(smiles_str, smi_rev)
+        assert smiles_str == smi_rev
