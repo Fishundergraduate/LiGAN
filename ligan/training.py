@@ -28,6 +28,7 @@ from .metrics import (
 from tqdm import tqdm
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import smiles as gsmiles
+from torch_geometric.utils import to_dense_adj
 from .data import convert_to_original_data
 MB = 1024 ** 2
 
@@ -423,6 +424,7 @@ class GenerativeSolver(nn.Module):
         inp = data[0].to(self.device)
         cond = data[1].to(self.device)
         outputs, in_latents, means, log_stds = self.gen_model.forward(inp,cond,batch_size=self.train_data.batch_size)
+        inp_adj = to_dense_adj(inp.edge_index, batch=inp.batch, edge_attr = inp.edge_attr)
         """ if posterior or has_cond: # get real examples
             input_grids, cond_grids, input_structs, cond_structs, _, _ = \
                 data.forward()
@@ -476,8 +478,8 @@ class GenerativeSolver(nn.Module):
             #rec_lig_grids=lig_gen_grids if has_cond else None,
             #latent2_means=latent2_means if compute_stage2_loss else None,
             #latent2_log_stds=latent2_log_stds if compute_stage2_loss else None,
-            #real_latents=latent_vecs if compute_stage2_loss else None,
-            #gen_latents=latent_vecs_gen if compute_stage2_loss else None,
+            real_latents=inp_adj if has_cond else None,
+            gen_latents=in_latents.x.reshape(inp_adj.shape) if has_cond else None,
             #gen_log_var=self.gen_model.log_recon_var if posterior else None,
             #prior_log_var=self.prior_model.log_recon_var if compute_stage2_loss else None,
             #iteration=self.gen_iter,
