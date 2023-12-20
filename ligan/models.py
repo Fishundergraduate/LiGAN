@@ -1135,18 +1135,22 @@ class AdjDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.fc1 = nn.Linear(3,12)
-        self.fc2 = nn.Linear(12,12)
-        self.fc3 = nn.Linear(12,3)
+        self.fc2 = nn.Linear(12,24)
+        self.fc3 = nn.Linear(24,12)
+        self.fc4 = nn.Linear(12,3)
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, data:Batch):
         x = self.fc1(data.x)
-        x = torch.tanh(x)
+        x = torch.relu(x)
         x = self.dropout(x)
         x = self.fc2(x)
-        x = torch.tanh(x)
+        x = torch.relu(x)
         x = self.dropout(x)
         x = self.fc3(x)
+        x = torch.relu(x)
+        x = self.dropout(x)
+        x = self.fc4(x)
         x = torch.relu(x)
         data.x = x
         return data

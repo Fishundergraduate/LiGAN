@@ -227,9 +227,18 @@ class GenerativeSolver(nn.Module):
     ):
         self.n_gen_train_iters = n_train_iters
         self.gen_clip_grad = clip_gradient
+        self.gen_optimizers = []
         self.gen_optimizer = getattr(optim, type)(
             self.gen_model.parameters(), **gen_optim_kws
         )
+        self.gen_optimizers.append(self.gen_optimizer)
+        for __model in self.gen_model.children():
+            if isinstance(__model, models.AdjDecoder):
+                self.adj_optimizer = getattr(optim, type)(
+                    __model.parameters(), **gen_optim_kws
+                )
+                self.gen_optimizers.append(self.adj_optimizer)
+                break
         self.gen_iter = 0
 
 
@@ -289,7 +298,8 @@ class GenerativeSolver(nn.Module):
         state_file = self.gen_solver_state_file
         print('Saving generative solver state to ' + state_file)
         state_dict = OrderedDict()
-        state_dict['optim_state'] = self.gen_optimizer.state_dict() 
+        for i,optimizer in enumerate(self.gen_optimizers):
+            state_dict['optim_state_'+str(i)] = optimizer.state_dict()
         state_dict['iter'] = self.gen_iter
         torch.save(state_dict, state_file)
 
@@ -310,7 +320,8 @@ class GenerativeSolver(nn.Module):
         print('Loading generative solver state from ' + state_file)
         state_dict = torch.load(state_file)
 
-        self.gen_optimizer.load_state_dict(state_dict['optim_state'])
+        for i,optimizer in enumerate(self.gen_optimizers):
+            optimizer.load_state_dict(state_dict['optim_state_'+str(i)])
         self.gen_iter = state_dict['iter']
 
 
@@ -562,7 +573,8 @@ class GenerativeSolver(nn.Module):
         t0 = time.time()
 
         # compute gradient of loss wrt parameters
-        self.gen_optimizer.zero_grad()
+        for optimizer in self.gen_optimizers:
+            optimizer.zero_grad()
         loss.backward()
 
         t1 = time.time()
@@ -580,7 +592,8 @@ class GenerativeSolver(nn.Module):
         t2 = time.time()
 
         if update: # descend gradient on parameters
-            self.gen_optimizer.step()
+            for optimizer in self.gen_optimizers:
+                optimizer.step()
             self.gen_iter += 1
 
             # update the prior model on each gen step, also

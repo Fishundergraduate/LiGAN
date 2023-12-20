@@ -148,7 +148,7 @@ class LossFunction(nn.Module):
 
         if has_both(lig_grids, lig_gen_grids):
             recon_loss = self.recon_loss_fn(
-                lig_gen_grids, lig_grids, gen_log_var
+                lig_gen_grids, lig_grids#, gen_log_var
             )
             recon_loss_wt = self.recon_loss_schedule(iteration, use_loss_wt)
             loss += recon_loss_wt * recon_loss
@@ -186,13 +186,14 @@ class LossFunction(nn.Module):
 
         if has_both(real_latents, gen_latents):
             recon2_loss = self.recon2_loss_fn(
-                gen_latents, real_latents, prior_log_var
+                gen_latents, real_latents#, prior_log_var
             )
+            #import ipdb; ipdb.set_trace()
             recon2_loss_wt = self.recon2_loss_schedule(iteration, use_loss_wt)
             loss += recon2_loss_wt * recon2_loss
             losses['recon2_loss'] = recon2_loss.item()
             losses['recon2_loss_wt'] = recon2_loss_wt.item()
-            losses['recon2_log_var'] = prior_log_var.item()
+            #losses['recon2_log_var'] = prior_log_var.item()
 
         losses['loss'] = loss.item()
         return loss, losses
@@ -246,11 +247,13 @@ def get_kldiv_loss_fn(type):
 
 
 def get_recon_loss_fn(type):
-    assert type in {'1', '2'}, type
+    assert type in {'1', '2', 'c'}, type
     if type == '1':
         return L1_loss
-    else: # '2'
+    elif type == '2': # '2'
         return L2_loss
+    else: # 'c'
+        return torch.nn.CrossEntropyLoss()
 
 
 def get_gan_loss_fn(type):
@@ -282,7 +285,7 @@ def L1_loss(predictions, labels, log_var=0):
     return torch.sum(
         ((labels - predictions) / torch.exp(log_var)).abs() + log_var
     ) / labels.shape[0]
-    
+
 
 def L2_loss(predictions, labels, log_var=0):
     # https://github.com/daib13/TwoStageVAE/blob/master/network/two_stage_vae_model.py#L39
