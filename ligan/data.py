@@ -22,6 +22,10 @@ from glob import glob
 from rdkit import RDLogger, Chem
 
 from torch_geometric.utils import smiles, dense_to_sparse
+from Bio.PDB import PDBParser
+from scipy.spatial.distance import cdist
+import torch
+import periodictable as pt
 # RDKitのエラーメッセージを無効にする
 RDLogger.DisableLog('rdApp.*')
 gs = Graphsite()
@@ -823,3 +827,20 @@ def extract_options_from_sdf(sdf_file_path)->list[float]:
             options_list.append(options)
 
     return options_list
+
+def pdb_to_graph(pdb_file, threshold=5.0):
+    """
+        Returns node_feature and edge_index
+        #TODO: atom_feature should be extended
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure('protein', pdb_file)
+    model = structure[0]
+    atoms = list(model.get_atoms())
+    coords = np.array([atom.get_coord() for atom in atoms])
+    features = np.array([pt.elements.symbol(atom.element).number for atom in atoms])
+    distance_matrix = cdist(coords, coords)
+    edge_index = np.argwhere(distance_matrix <= threshold)
+    return features, edge_index
+    data = Data(x=torch.tensor(features, dtype=torch.float).view(-1, 1), edge_index=torch.tensor(edge_index, dtype=torch.long).t().contiguous())
+    return data

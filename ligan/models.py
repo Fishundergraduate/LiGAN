@@ -1,7 +1,6 @@
 import sys
 from turtle import forward
 
-from git import Object
 import torch_geometric
 import numpy as np
 from scipy import stats

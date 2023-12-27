@@ -796,13 +796,13 @@ class GenerativeSolver(nn.Module):
  
             # save model and optimizer states
             if last_save != i and divides(save_interval, i):
-                self.save_state()
                 last_save = i
 
             # test models on test data
             if last_test != i and divides(test_interval, i):
                 fit_atoms = (fit_interval > 0 and divides(fit_interval, i))
                 self.test_models(n_batches=n_test_batches, fit_atoms=fit_atoms)
+                self.save_state()
                 last_test = i
 
             # train models on training data
