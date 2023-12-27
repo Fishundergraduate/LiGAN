@@ -155,7 +155,7 @@ class GenerativeSolver(nn.Module):
             data.AtomGridData(device=device, data_file=train_file, **data_kws)
         self.test_data = \
             data.AtomGridData(device=device, data_file=test_file, **data_kws) """
-        if data_kws["pickle"] is not None:
+        if "pickle" in data_kws.keys():
             self.train_data = torch.load(data_kws["pickle"]+"/train3.pt")
             self.test_data = torch.load(data_kws["pickle"]+"/test.pt")
         else:

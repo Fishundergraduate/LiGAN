@@ -103,26 +103,31 @@ def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
 
 class biDataset(utils.data.Dataset):
     def __init__(self, datarootDir:str, device:str="cuda"):
-        pock_path = glob(datarootDir+"/pocket-data/*00")
-        pockID = [x.split("/")[-1][:5] for x in pock_path]
-        mol2_path = [x+"/"+x.split("/")[-1]+".mol2" for x in pock_path]
-        __sdf_path = [x.split(".")[0]+".sdf" for x in mol2_path]
-        lig_smi = [convert_to_smiles(x) for x in __sdf_path] # Nullable List
-        dataA = pd.DataFrame({"pockID":pockID,"mol2_path":mol2_path,"lig_smi":lig_smi})
+        mol2_path = glob(datarootDir+"/pocket/*.mol2")
+        pockID = [os.path.splitext(os.path.basename(x))[0] for x in mol2_path]
+        dataA = pd.DataFrame({"pockID":pockID,"mol2_path":mol2_path})
+        
+        lig_path = glob(datarootDir+"/ligand/*.sdf")
+        lig_smi = [convert_to_smiles(x) for x in lig_path] # Nullable List
+        ligID = [os.path.splitext(os.path.basename(x))[0] for x in lig_path]
+        dataB = pd.DataFrame({"ligID":ligID,"lig_smi":lig_smi})
 
 
-        prot_path = glob(datarootDir+"/protein-data-part1/*")+glob(datarootDir+"/protein-data-part2/*")
-        protID = [x.split("/")[-1] for x in prot_path]
-        profile_path = [x+"/"+x.split("/")[-1]+".profile" for x in prot_path]
-        pops_path = [x.split(".")[0]+".pops" for x in profile_path]
-        dataB = pd.DataFrame({"protID":protID,"profile_path":profile_path,"pops_path":pops_path})
+        pops_path = glob(datarootDir+"/protein/*.pops")
+        popsID = [os.path.splitext(os.path.basename(x))[0] for x in pops_path]
+        dataC = pd.DataFrame({"popsID":popsID,"pops_path":pops_path})
+        
+        profile_path = glob(datarootDir+"/protein/*.profile")
+        profileID = [os.path.splitext(os.path.basename(x))[0] for x in profile_path]
+        dataD= pd.DataFrame({"profileID":profileID,"profile_path":profile_path})
         # DataFrameを結合
-        merged_data = pd.merge(dataA, dataB, left_on='pockID', right_on='protID')
+        # DataFrameを結合
+        merged_data = pd.merge(dataA, dataB, left_on='pockID', right_on='ligID')
+        merged_data = pd.merge(merged_data, dataC, left_on='pockID', right_on='popsID')
+        merged_data = pd.merge(merged_data, dataD, left_on='pockID', right_on='profileID')
         merged_data = merged_data.dropna()
-        merged_data = merged_data.drop(columns=['pockID','protID'])
+        merged_data = merged_data.drop(columns=['ligID','popsID','profileID'])
         self.data = merged_data
-        #lig_graph = [create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x) for x in lig_smi]
-        #prot_graph = [gs(mol_path=mol2path,profile_path=profilepath,pop_path=popspath) for mol2path,profilepath,popspath in zip(mol2_path,profile_path,pops_path)]
         self.device = device
         self.smiles_graph , error_list= self.smiles2graphlist(self.data['lig_smi'])
         self.data = self.data[~self.data['lig_smi'].isin(error_list)]
@@ -131,22 +136,7 @@ class biDataset(utils.data.Dataset):
 
     def __len__(self):
         return len(self.data)
-    #TODO: data should be located in a list.
     def __getitem__(self, idx):
-        #lig_graph = create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
-        """ lig_graph = smiles.from_smiles(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
-        lig_graph = Data(x = lig_graph.x.to(torch.float32),
-                         edge_index=lig_graph.edge_index.to(torch.int64),
-                         edge_attr=lig_graph.edge_attr.to(torch.float),
-                         smiles = lig_graph.smiles)
-        node,edge,attr = gs(mol_path=self.data.iloc[idx]['mol2_path'],profile_path=self.data.iloc[idx]['profile_path'],pop_path=self.data.iloc[idx]['pops_path'])
-        prot_graph = Data(
-            x=torch.from_numpy(node).to(torch.float32),
-            edge_index=torch.from_numpy(edge).to(torch.long),
-            edge_attr=torch.from_numpy(attr).to(torch.float32),
-            y=torch.tensor([0.0]).to(torch.float32))
-        lig_graph = lig_graph.to(self.device)
-        prot_graph = prot_graph.to(self.device) """
         lig_graph = self.smiles_graph[idx]
         prot_graph = self.prot_graph[idx]
 

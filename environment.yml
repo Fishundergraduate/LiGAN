@@ -1,4 +1,4 @@
-name: LiGAN-3
+name: LiGAN
 channels:
   - pytorch
   - nvidia
@@ -9,7 +9,7 @@ dependencies:
   - gxx=10
   - zlib
   - cmake>=3.18
-  - cudatoolkit-dev=11.7
+  #- cudatoolkit-dev=11.8
   - python
   - boost
   - numpy
@@ -32,3 +32,4 @@ dependencies:
   - pip:
     - graphsite
     - biopython
+    - periodictable
