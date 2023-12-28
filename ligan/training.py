@@ -155,11 +155,11 @@ class GenerativeSolver(nn.Module):
             data.AtomGridData(device=device, data_file=train_file, **data_kws)
         self.test_data = \
             data.AtomGridData(device=device, data_file=test_file, **data_kws) """
-        if "pickle" in data_kws.keys():
+        if  data_kws["prepared_dataset"]:
             self.train_data = torch.load(data_kws["pickle"]+"/train3.pt")
             self.test_data = torch.load(data_kws["pickle"]+"/test.pt")
         else:
-            __ds = data.biDataset(train_file, device=device)
+            __ds = data.biDataset(train_file, data_kws['cut_size'], device=device)
             train_size = int(len(__ds)*0.8)
             test_size = len(__ds) - train_size
             self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size])
@@ -240,6 +240,7 @@ class GenerativeSolver(nn.Module):
                 self.gen_optimizers.append(self.adj_optimizer)
                 break
         self.gen_iter = 0
+        self.test_iter = 0
 
 
     def init_loss_fn(
@@ -594,7 +595,6 @@ class GenerativeSolver(nn.Module):
         if update: # descend gradient on parameters
             for optimizer in self.gen_optimizers:
                 optimizer.step()
-            self.gen_iter += 1
 
             # update the prior model on each gen step, also
             if self.has_prior_model:
@@ -673,7 +673,7 @@ class GenerativeSolver(nn.Module):
             grad_norm = metrics['gen_grad_norm']
             assert not np.isnan(grad_norm), 'generator gradient is nan'
             assert not np.isclose(0, grad_norm), 'generator gradient is zero'
-
+        
         return metrics
 
     def test_model(self, n_batches, model_type, fit_atoms=False):
@@ -694,7 +694,6 @@ class GenerativeSolver(nn.Module):
                 grid_type=grid_type,
                 fit_atoms=fit_atoms
             )
-            #metrics = OrderedDict((f'test_{k}', v) for k, v in metrics.items())
 
             metrics['memory'] = get_memory_used() / MB
             metrics['forward_time'] = time.time() - t0
@@ -708,12 +707,14 @@ class GenerativeSolver(nn.Module):
         # log metrics to wandb
         if self.use_wandb:
             wandb_metrics = metrics.copy()
+            wandb_metrics = OrderedDict((f'test_{k}', v) for k, v in wandb_metrics.items())
             wandb_metrics.update(dict(zip(self.index_cols, idx)))
             wandb.log(wandb_metrics)
 
         idx = idx[:-1]
         metrics = self.metrics.loc[idx].mean()
         self.print_metrics(idx, metrics)
+        self.test_iter += 1
 
     def test_models(self, n_batches, fit_atoms):
         '''
@@ -734,7 +735,7 @@ class GenerativeSolver(nn.Module):
         its parameters.
         '''
         valid_model_types = {'gen'}
-
+        metrics_list = pd.DataFrame()
         for i in range(n_iters):
             batch_idx = 0 if update else i
 
@@ -746,22 +747,25 @@ class GenerativeSolver(nn.Module):
                 compute_norm=compute_norm,
                 batch_idx=batch_idx
             )
+            metrics_list = pd.concat([metrics_list, metrics])
 
-            """ #metrics = OrderedDict((f'train_{k}', v) for k, v in metrics.items())
 
-            metrics['memory'] = get_memory_used() / MB
-            metrics['forward_gpu'] = torch.cuda.max_memory_allocated() / MB
-            idx = (
-                self.gen_iter, self.disc_iter,
-                'train', model_type, grid_type, i
-            )
-            self.insert_metrics(idx, metrics)
+        metrics = metrics_list.mean(axis=1)
+        metrics['memory'] = get_memory_used() / MB
+        metrics['forward_gpu'] = torch.cuda.max_memory_allocated() / MB
+        idx = (
+            self.gen_iter, self.disc_iter,
+            'train', model_type, grid_type, i
+        )
+        self.insert_metrics(idx, metrics)
 
-            # log metrics to wandb
-            if self.use_wandb:
-                wandb_metrics = metrics.copy()
-                wandb_metrics.update(dict(zip(self.index_cols, idx)))
-                wandb.log(wandb_metrics) """
+        # log metrics to wandb
+        if self.use_wandb:
+            wandb_metrics = metrics.copy()
+            wandb_metrics = OrderedDict((f'train_{k}', v) for k, v in wandb_metrics.items())
+            wandb_metrics.update(dict(zip(self.index_cols, idx)))
+            wandb.log(wandb_metrics)
+        self.gen_iter += 1
 
     def train_models(self, update=True, compute_norm=False):
         '''

@@ -1,4 +1,3 @@
-import imp
 import sys, os, re, time
 import pandas as pd
 from openbabel import openbabel as ob
@@ -102,31 +101,28 @@ def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
     return DataLoader(__train_pipe,batch_size=batch_size,shuffle=False), DataLoader(__test_pipe, batch_size)
 
 class biDataset(utils.data.Dataset):
-    def __init__(self, datarootDir:str, device:str="cuda"):
-        mol2_path = glob(datarootDir+"/pocket/*.mol2")
-        pockID = [os.path.splitext(os.path.basename(x))[0] for x in mol2_path]
-        dataA = pd.DataFrame({"pockID":pockID,"mol2_path":mol2_path})
-        
-        lig_path = glob(datarootDir+"/ligand/*.sdf")
-        lig_smi = [convert_to_smiles(x) for x in lig_path] # Nullable List
-        ligID = [os.path.splitext(os.path.basename(x))[0] for x in lig_path]
-        dataB = pd.DataFrame({"ligID":ligID,"lig_smi":lig_smi})
+    def __init__(self, datarootDir:str, cut_size: int = 5, device:str="cuda"):
+        merged_data = pd.DataFrame()
+        for cut_size in {5,7,10}:
+            mol2_path = glob(datarootDir+f"/receptor/receptor_near_ligand_{cut_size}.mol2")[0]
+
+            lig_path = glob(datarootDir+"/ligands/*.sdf")
+            lig_smi = [convert_to_smiles(x) for x in lig_path] # Nullable List
+            ligID = [os.path.splitext(os.path.basename(x))[0] for x in lig_path]
+            dataB = pd.DataFrame({"ligID":ligID,"lig_smi":lig_smi})
 
 
-        pops_path = glob(datarootDir+"/protein/*.pops")
-        popsID = [os.path.splitext(os.path.basename(x))[0] for x in pops_path]
-        dataC = pd.DataFrame({"popsID":popsID,"pops_path":pops_path})
-        
-        profile_path = glob(datarootDir+"/protein/*.profile")
-        profileID = [os.path.splitext(os.path.basename(x))[0] for x in profile_path]
-        dataD= pd.DataFrame({"profileID":profileID,"profile_path":profile_path})
-        # DataFrameを結合
-        # DataFrameを結合
-        merged_data = pd.merge(dataA, dataB, left_on='pockID', right_on='ligID')
-        merged_data = pd.merge(merged_data, dataC, left_on='pockID', right_on='popsID')
-        merged_data = pd.merge(merged_data, dataD, left_on='pockID', right_on='profileID')
-        merged_data = merged_data.dropna()
-        merged_data = merged_data.drop(columns=['ligID','popsID','profileID'])
+            pops_path = glob(datarootDir+f"/protein/receptor.pops")[0]
+            
+            profile_path = glob(datarootDir+f"/protein/receptor.profile")[0]
+            # DataFrameを結合
+            # DataFrameを結合
+            dataB['mol2_path'] = mol2_path
+            dataB['pops_path'] = pops_path
+            dataB['profile_path'] = profile_path
+            dataB = dataB.dropna()
+            dataB = dataB.drop(columns=['ligID'])
+            merged_data = pd.concat([merged_data,dataB], axis=0)
         self.data = merged_data
         self.device = device
         self.smiles_graph , error_list= self.smiles2graphlist(self.data['lig_smi'])
