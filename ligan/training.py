@@ -156,8 +156,8 @@ class GenerativeSolver(nn.Module):
         self.test_data = \
             data.AtomGridData(device=device, data_file=test_file, **data_kws) """
         if  data_kws["prepared_dataset"]:
-            self.train_data = torch.load(data_kws["pickle"]+"/train3.pt")
-            self.test_data = torch.load(data_kws["pickle"]+"/test.pt")
+            self.train_data = torch.load(data_kws["train_dataset"])
+            self.test_data = torch.load(data_kws["test_dataset"])
         else:
             __ds = data.biDataset(train_file, data_kws['cut_size'], device=device)
             train_size = int(len(__ds)*0.8)
