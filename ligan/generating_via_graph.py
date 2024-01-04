@@ -1,6 +1,8 @@
 import sys, os, re, time, gzip, itertools
 from collections import defaultdict
 from pathlib import Path
+
+from sklearn import utils
 import numpy as np
 import pandas as pd
 pd.set_option('display.width', 200)
@@ -11,10 +13,14 @@ import torch
 from rdkit import Chem
 
 import ligan
-from ligan import models
+from ligan import models, data
 from ligan.atom_grids import AtomGrid
 from ligan.atom_structs import AtomStruct
 from ligan import molecules as mols
+
+from torch_geometric.data import DataLoader, Data
+import glob
+from torch_geometric.utils import smiles as gsmiles
 
 MB = 1024 ** 2
 
@@ -47,30 +53,22 @@ class MoleculeGenerator(object):
         super().__init__()
         self.device = device
 
-        if False:
-            print('Loading data')
-            self.init_data(device=device, n_samples=n_samples, **data_kws)
-        else:
-            self.tmp_n_channels_in = 9
-            self.tmp_n_channels_cond = 11
-            self.tmp_n_channels_out = 9
-            self.batch_size = data_kws['batch_size']
-            
+    
+        print('Loading data')
+        self.init_data(device=device, **data_kws)
+        self.tmp_n_channels_in = 9
+        self.tmp_n_channels_cond = 11
+        self.tmp_n_channels_out = 9
+        self.batch_size = data_kws['batch_size']
+        
         if self.gen_model_type:
             print('Initializing generative model')
             self.init_gen_model(
                 device=device, n_samples=n_samples, **gen_model_kws
             )
-
-            if self.gen_model_type.has_stage2:
-                print('Initializing prior model')
-                self.init_prior_model(device=device, **prior_model_kws)
-            else:
-                self.prior_model = None
-        else:
-            print('No generative model')
-            self.gen_model = None
             self.prior_model = None
+        else:
+            assert False, 'Must specify generative model type'
 
         print('Initializing output writer')
         self.out_writer = OutputWriter(
@@ -80,10 +78,33 @@ class MoleculeGenerator(object):
             **output_kws,
         )
 
-    def init_data(self, device, n_samples, **data_kws):
-        self.data = ligan.data.AtomGridData(
-            device=device, n_samples=n_samples, **data_kws
-        )
+    def init_data(self, device, train_file, test_file, **data_kws):
+        #self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=data_kws['batch_size'], train_ratio=data_kws['train_ratio'])
+        #self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=10**6, train_ratio=data_kws['train_ratio'])
+        """ self.train_data = \
+            data.AtomGridData(device=device, data_file=train_file, **data_kws)
+        self.test_data = \
+            data.AtomGridData(device=device, data_file=test_file, **data_kws) """
+        if data_kws["pickle"] is not None:
+            self.train_data = torch.load(data_kws["pickle"]+"/train3.pt")
+            self.test_data = torch.load(data_kws["pickle"]+"/test.pt")
+        else:
+            __ds = data.biDataset(train_file, device=device)
+            train_size = int(len(__ds)*0.8)
+            test_size = len(__ds) - train_size
+            self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size])
+        self.train_data = DataLoader(self.train_data,
+                                     batch_size=data_kws['batch_size'],
+                                     num_workers=0)
+        self.test_data = DataLoader(self.test_data,
+                                    batch_size=data_kws['batch_size'],
+                                    num_workers=0)
+        mol2_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.mol2")
+        profile_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.profile")
+        pops_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.pops")
+        mol2_path_list = [i for i in mol2_path_list if os.path.basename(i).split('.')[0][:4] not in [os.path.basename(j).split('.')[0] for j in profile_path_list]]
+        self.recept_list, _ = self.train_data.dataset.dataset.prot2graphlist(mol2_path_list=mol2_path_list, profile_path_list=profile_path_list, pops_path_list=pops_path_list)
+        import ipdb; ipdb.set_trace()
 
     def init_gen_model(
         self,
@@ -107,27 +128,6 @@ class MoleculeGenerator(object):
             state_dict = torch.load(state)
             state_dict.pop('log_recon_var', None)
             self.gen_model.load_state_dict(state_dict)
-
-    def init_prior_model(
-        self,
-        device,
-        caffe_init=False,
-        state=None,
-        **prior_model_kws
-    ):
-        self.prior_model = ligan.models.Stage2VAE(
-            n_input=self.gen_model.n_latent,
-            **prior_model_kws
-        ).to(device)
-
-        if caffe_init:
-            self.prior_model.apply(ligan.models.caffe_init_weights)
-
-        if state:
-            print('Loading prior model state')
-            state_dict = torch.load(state)
-            state_dict.pop('log_recon_var', None)
-            self.prior_model.load_state_dict(state_dict)
 
     @property
     def n_channels_in(self):
@@ -164,57 +164,28 @@ class MoleculeGenerator(object):
         spherical=False,
         **kwargs
     ):
-        print(f'Calling generator (prior={prior}, stage2={stage2})')
-
         print('Getting next batch of data')
-        data = self.data
-        input_grids, cond_grids, input_structs, cond_structs, transforms \
-            = data.forward(interpolate=interpolate, spherical=spherical)[:5]
-        input_rec_structs, input_lig_structs = input_structs
-        cond_rec_structs, cond_lig_structs = cond_structs
-        input_transforms, cond_transforms = transforms
-        input_rec_grids, input_lig_grids = data.split_channels(input_grids)
-        cond_rec_grids, cond_lig_grids = data.split_channels(cond_grids)
 
-        posterior = not prior
-        if posterior:
-            if self.has_complex_input:
-                gen_input_grids = torch.cat(
-                    [input_rec_grids, input_lig_grids], dim=1
-                )
-            else:
-                gen_input_grids = input_lig_grids
-        else:
-            gen_input_grids = None
-
-        gen_cond_grids = cond_rec_grids
-
+        smiles_list = []
         if self.gen_model:
 
             with torch.no_grad():
-                if stage2: # insert prior model
-                    lig_gen_grids, _, _, _, latents, _, _ = \
-                        self.gen_model.forward2(
-                            prior_model=self.prior_model,
-                            inputs=gen_input_grids,
-                            conditions=gen_cond_grids,
-                            interpolate=interpolate,
-                            spherical=spherical,
-                            batch_size=self.batch_size,
-                            **kwargs
-                        )
-                else:
-                    lig_gen_grids, latents, _, _ = self.gen_model(
-                        inputs=gen_input_grids,
-                        conditions=gen_cond_grids,
-                        batch_size=self.batch_size,
-                        interpolate=interpolate,
-                        spherical=spherical,
-                        **kwargs
-                    )
-        else:
-            lig_gen_grids, latents = None, None
+                import ipdb ; ipdb.set_trace()
+                #TODO: get protein from data
 
+                protein = None
+                for num_node in range(1,100):
+                    in_latent_vec = torch.randn(num_node, 128).to(self.device)
+                    cond_latent_vec, skip_cond = self.gen_model.conditional_encoder(protein)
+                    cond = cond_latent_vec.x.mean(dim=0,keepdim=True).repeat(num_node, 1)
+                    latent_vec = torch.cat([in_latent_vec, cond_latent_vec], dim=1)
+                    
+                    adj_matrix = self.gen_model.attr_decoder(latent_vec)
+                    edge_index, edge_attr = data.convert_to_edge_attr(adj_matrix)
+                    output = self.gen_model.decoder(latent_vec, skip_cond)
+                    out_smiles = gsmiles.to_smiles(Data(output.x, edge_index, edge_attr, device=self.device), canonical=True, kekulize=True, isomericSmiles=True)
+                    smiles_list.append(out_smiles)
+        return smiles_list
         def try_detach(x):
             try:
                 return x.detach()
@@ -268,8 +239,7 @@ class MoleculeGenerator(object):
             #print(example_idx, sample_idx, full_idx, batch_idx)
 
             need_real_input_mol = (sample_idx == 0)
-            need_real_cond_mol = \
-                (sample_idx == 0 and self.data.diff_cond_structs)
+            need_real_cond_mol = False
             need_next_batch = (batch_idx == 0)
 
             if need_next_batch: # forward next batch
@@ -374,39 +344,8 @@ class MoleculeGenerator(object):
                 assert input_rec_struct.info['src_file'] == input_rec_src_file
                 assert input_lig_struct.info['src_file'] == input_lig_src_file
 
-            # if the conditional molecule is different,
-            #   we need to process it separately from input
-            if need_real_cond_mol:
-
-                cond_rec_src_file = cond_rec_struct.info['src_file']
-                cond_rec_mol = read_rec_from_pdb_file(cond_rec_src_file)
-                cond_rec_name = splitext(os.path.basename(cond_rec_src_file))[0]
-
-                cond_lig_src_file = cond_lig_struct.info['src_file']
-                cond_lig_mol = read_lig_from_sdf_file(cond_lig_src_file)
-                cond_lig_name = splitext(os.path.basename(cond_lig_src_file))[0]
-
-                if uff_minimize:
-                    # real molecules don't need UFF minimization,
-                    #   but we need their UFF metrics for reference
-                    cond_pkt_mol = cond_rec_mol.get_pocket(lig_mol=cond_lig_mol)
-                    cond_lig_mol.info['pkt_mol'] = cond_pkt_mol
-                    cond_uff_mol = \
-                        cond_lig_mol.uff_minimize(rec_mol=cond_pkt_mol)
-                    cond_lig_mol.info['uff_mol'] = cond_uff_mol
-
-                    if minimize_real:
-                        print('Minimizing real molecule with gnina', flush=True)
-                        # NOTE that we are not using the UFF mol here
-                        cond_lig_mol.info['gni_mol'] = \
-                            cond_lig_mol.gnina_minimize(rec_mol=cond_rec_mol)
-
-            elif self.data.diff_cond_structs:
-                assert cond_rec_struct.info['src_file'] == cond_rec_src_file
-                assert cond_lig_struct.info['src_file'] == cond_lig_src_file
-            else:
-                cond_rec_name = input_rec_name
-                cond_lig_name = input_lig_name
+            cond_rec_name = input_rec_name
+            cond_lig_name = input_lig_name
 
             # unique identifier for this data example
             example_info = (

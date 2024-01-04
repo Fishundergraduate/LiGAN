@@ -1,6 +1,8 @@
 import sys, os, time, psutil, pynvml, re, glob
 from collections import OrderedDict
 from functools import partial
+
+from sympy import Order
 import numpy as np
 import pandas as pd
 import torch
@@ -23,8 +25,11 @@ from .metrics import (
     compute_struct_metrics,
     compute_paired_struct_metrics
 )
-
-
+from tqdm import tqdm
+from torch_geometric.loader import DataLoader
+from torch_geometric.utils import smiles as gsmiles
+from torch_geometric.utils import to_dense_adj
+from .data import convert_to_original_data
 MB = 1024 ** 2
 
 def get_memory_used():
@@ -70,7 +75,7 @@ class GenerativeSolver(nn.Module):
     # subclasses override these class attributes
     #gen_model_type = None
     #has_disc_model = False
-    #has_prior_model = False
+    has_prior_model = False
     has_complex_input = False
 
     def __init__(
@@ -99,7 +104,6 @@ class GenerativeSolver(nn.Module):
 
         # learn recon loss variance as a parameter
         self.learn_recon_var = loss_fn_kws.pop('learn_recon_var', False)
-
         print('Initializing generative model and optimizer')
         self.init_gen_model(device=device, **gen_model_kws)
         self.init_gen_optimizer(**gen_optim_kws)
@@ -114,10 +118,10 @@ class GenerativeSolver(nn.Module):
         print('Initializing atom fitter and bond adder')
         self.atom_fitter = atom_fitting.AtomFitter(
             device=device, **atom_fitting_kws
-        )
+        ) if False else None
         self.bond_adder = bond_adding.BondAdder(
             debug=debug, **bond_adding_kws
-        )
+        ) if False else None
 
         # set up a data frame of training metrics
         self.index_cols = [
@@ -151,10 +155,20 @@ class GenerativeSolver(nn.Module):
             data.AtomGridData(device=device, data_file=train_file, **data_kws)
         self.test_data = \
             data.AtomGridData(device=device, data_file=test_file, **data_kws) """
-        __ds = data.biDataset(train_file)
-        train_size = int(len(__ds)*0.8)
-        test_size = len(__ds) - train_size
-        self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size])
+        if  data_kws["prepared_dataset"]:
+            self.train_data = torch.load(data_kws["train_dataset"])
+            self.test_data = torch.load(data_kws["test_dataset"])
+        else:
+            __ds = data.biDataset(train_file, data_kws['cut_size'], device=device)
+            train_size = int(len(__ds)*0.8)
+            test_size = len(__ds) - train_size
+            self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size])
+        self.train_data = DataLoader(self.train_data,
+                                     batch_size=data_kws['batch_size'],
+                                     num_workers=0)
+        self.test_data = DataLoader(self.test_data,
+                                    batch_size=data_kws['batch_size'],
+                                    num_workers=0)
     def init_gen_model(
         self,
         device,
@@ -163,9 +177,9 @@ class GenerativeSolver(nn.Module):
         **gen_model_kws
     ):
         self.gen_model = self.gen_model_type(
-            n_channels_in=36,#self.n_channels_in,
-            n_channels_cond=36,#self.n_channels_cond,
-            n_channels_out=36,#self.n_channels_out,
+            n_channels_in=9,#self.n_channels_in,
+            n_channels_cond=11,#self.n_channels_cond,
+            n_channels_out=9,#self.n_channels_out,
             device=device,
             **gen_model_kws
         )
@@ -213,10 +227,20 @@ class GenerativeSolver(nn.Module):
     ):
         self.n_gen_train_iters = n_train_iters
         self.gen_clip_grad = clip_gradient
+        self.gen_optimizers = []
         self.gen_optimizer = getattr(optim, type)(
             self.gen_model.parameters(), **gen_optim_kws
         )
+        self.gen_optimizers.append(self.gen_optimizer)
+        for __model in self.gen_model.children():
+            if isinstance(__model, models.AdjDecoder):
+                self.adj_optimizer = getattr(optim, type)(
+                    __model.parameters(), **gen_optim_kws
+                )
+                self.gen_optimizers.append(self.adj_optimizer)
+                break
         self.gen_iter = 0
+        self.test_iter = 0
 
 
     def init_loss_fn(
@@ -275,7 +299,8 @@ class GenerativeSolver(nn.Module):
         state_file = self.gen_solver_state_file
         print('Saving generative solver state to ' + state_file)
         state_dict = OrderedDict()
-        state_dict['optim_state'] = self.gen_optimizer.state_dict() 
+        for i,optimizer in enumerate(self.gen_optimizers):
+            state_dict['optim_state_'+str(i)] = optimizer.state_dict()
         state_dict['iter'] = self.gen_iter
         torch.save(state_dict, state_file)
 
@@ -296,7 +321,8 @@ class GenerativeSolver(nn.Module):
         print('Loading generative solver state from ' + state_file)
         state_dict = torch.load(state_file)
 
-        self.gen_optimizer.load_state_dict(state_dict['optim_state'])
+        for i,optimizer in enumerate(self.gen_optimizers):
+            optimizer.load_state_dict(state_dict['optim_state_'+str(i)])
         self.gen_iter = state_dict['iter']
 
 
@@ -406,11 +432,12 @@ class GenerativeSolver(nn.Module):
         #  the 2nd stage VAE, which we do regardless of
         #  whether we decode the latent vecs it generates
         compute_stage2_loss = posterior
-
         t0 = time.time()
-        for it in data:
-            back = self.gen_model.forward(it[0],it[1])
-        if posterior or has_cond: # get real examples
+        inp = data[0].to(self.device)
+        cond = data[1].to(self.device)
+        outputs, in_latents, means, log_stds = self.gen_model.forward(inp,cond,batch_size=self.train_data.batch_size)
+        inp_adj = to_dense_adj(inp.edge_index, batch=inp.batch, edge_attr = inp.edge_attr)
+        """ if posterior or has_cond: # get real examples
             input_grids, cond_grids, input_structs, cond_structs, _, _ = \
                 data.forward()
             input_rec_structs, input_lig_structs = input_structs
@@ -419,14 +446,14 @@ class GenerativeSolver(nn.Module):
             cond_rec_grids, cond_lig_grids = data.split_channels(cond_grids)
 
         if self.sync_cuda:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize() """
         t1 = time.time()
 
-        if posterior: # set generator input grids
+        """ if posterior: # set generator input grids
             gen_input_grids = \
-                input_grids if self.has_complex_input else input_lig_grids
+                input_grids if self.has_complex_input else input_lig_grids """
 
-        if decode_stage2_vecs: # should only do this in test phase
+        """ if decode_stage2_vecs: # should only do this in test phase
             lig_gen_grids, latent_vecs, latent_means, latent_log_stds, \
             latent_vecs_gen, latent2_means, latent2_log_stds = \
                 self.gen_model.forward2(
@@ -447,7 +474,7 @@ class GenerativeSolver(nn.Module):
                 latent_vecs_gen, _, latent2_means, latent2_log_stds = \
                     self.prior_model(
                         inputs=latent_vecs, batch_size=data.batch_size
-                    )
+                    )"""
 
         if self.sync_cuda:
             torch.cuda.synchronize()
@@ -455,19 +482,19 @@ class GenerativeSolver(nn.Module):
 
 
         loss, metrics = self.loss_fn(
-            lig_grids=cond_lig_grids if posterior else None,
-            lig_gen_grids=lig_gen_grids if posterior else None,
-            latent_means=latent_means if posterior else None,
-            latent_log_stds=latent_log_stds if posterior else None,
-            rec_grids=cond_rec_grids if has_cond else None,
-            rec_lig_grids=lig_gen_grids if has_cond else None,
-            latent2_means=latent2_means if compute_stage2_loss else None,
-            latent2_log_stds=latent2_log_stds if compute_stage2_loss else None,
-            real_latents=latent_vecs if compute_stage2_loss else None,
-            gen_latents=latent_vecs_gen if compute_stage2_loss else None,
-            gen_log_var=self.gen_model.log_recon_var if posterior else None,
-            prior_log_var=self.prior_model.log_recon_var if compute_stage2_loss else None,
-            iteration=self.gen_iter,
+            lig_grids=inp.x if posterior else None,
+            lig_gen_grids=outputs.x if posterior else None,
+            latent_means=means.x if posterior else None,
+            latent_log_stds=log_stds.x if posterior else None,
+            #rec_grids=cond_rec_grids if has_cond else None,
+            #rec_lig_grids=lig_gen_grids if has_cond else None,
+            #latent2_means=latent2_means if compute_stage2_loss else None,
+            #latent2_log_stds=latent2_log_stds if compute_stage2_loss else None,
+            real_latents=inp_adj if has_cond else None,
+            gen_latents=in_latents.x.reshape(inp_adj.shape) if has_cond else None,
+            #gen_log_var=self.gen_model.log_recon_var if posterior else None,
+            #prior_log_var=self.prior_model.log_recon_var if compute_stage2_loss else None,
+            #iteration=self.gen_iter,
         )
 
         if self.sync_cuda:
@@ -475,7 +502,14 @@ class GenerativeSolver(nn.Module):
         t3 = time.time()
 
         if fit_atoms:
-            lig_gen_fit_structs, _ = self.atom_fitter.fit_batch(
+            try:
+                rec_smi = gsmiles.to_smiles(convert_to_original_data(outputs))
+                inp_smi = gsmiles.to_smiles(convert_to_original_data(inp))
+                if rec_smi == inp_smi:
+                    self.save_mols(rec_smi, grid_type)
+            except:
+                pass
+            """ lig_gen_fit_structs, _ = self.atom_fitter.fit_batch(
                 batch_values=lig_gen_grids,
                 center=torch.zeros(3),
                 resolution=data.resolution,
@@ -484,13 +518,13 @@ class GenerativeSolver(nn.Module):
             lig_gen_fit_mols, _ = self.bond_adder.make_batch(
                 structs=lig_gen_fit_structs
             )
-            self.save_mols(lig_gen_fit_mols, grid_type)
+            self.save_mols(lig_gen_fit_mols, grid_type) """
 
         if self.sync_cuda:
             torch.cuda.synchronize()
         t4 = time.time()
 
-        if posterior:
+        """ if posterior:
             metrics.update(compute_paired_grid_metrics(
                 'lig_gen', lig_gen_grids, 'lig', input_lig_grids
             ))
@@ -516,7 +550,7 @@ class GenerativeSolver(nn.Module):
             if has_cond:
                 metrics.update(compute_paired_struct_metrics(
                     'lig_gen_fit', lig_gen_fit_structs, 'cond_lig', cond_lig_structs
-                ))
+                )) """
 
         if self.sync_cuda:
             torch.cuda.synchronize()
@@ -540,7 +574,8 @@ class GenerativeSolver(nn.Module):
         t0 = time.time()
 
         # compute gradient of loss wrt parameters
-        self.gen_optimizer.zero_grad()
+        for optimizer in self.gen_optimizers:
+            optimizer.zero_grad()
         loss.backward()
 
         t1 = time.time()
@@ -558,8 +593,8 @@ class GenerativeSolver(nn.Module):
         t2 = time.time()
 
         if update: # descend gradient on parameters
-            self.gen_optimizer.step()
-            self.gen_iter += 1
+            for optimizer in self.gen_optimizers:
+                optimizer.step()
 
             # update the prior model on each gen step, also
             if self.has_prior_model:
@@ -589,32 +624,45 @@ class GenerativeSolver(nn.Module):
             self.gen_iter, self.disc_iter, 'train',
             'gen', grid_type, batch_idx,
         )
-        need_gradient = (update or compute_norm)
-        torch.cuda.reset_max_memory_allocated()
-        t0 = time.time()
+        mems = []
+        forward_durations = []
+        backward_durations = []
+        forward_gpus = []
+        backward_gpus = []
+        for i,d in enumerate(tqdm(self.train_data)):
+            need_gradient = (update or compute_norm)
+            torch.cuda.reset_peak_memory_stats()
+            t0 = time.time()
 
-        # forward pass
-        loss, metrics = self.gen_forward(self.train_data, grid_type)
+            # forward pass
+            loss, metrics = self.gen_forward(d, grid_type)
 
-        if self.sync_cuda:
-            torch.cuda.synchronize()
-        m1 = torch.cuda.max_memory_allocated()
-        torch.cuda.reset_max_memory_allocated()
-        t1 = time.time()
+            if self.sync_cuda:
+                torch.cuda.synchronize()
+            m1 = torch.cuda.max_memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            t1 = time.time()
 
-        if need_gradient: # backward pass
-            metrics.update(self.gen_backward(loss, update, compute_norm))
+            if need_gradient: # backward pass
+                metrics.update(self.gen_backward(loss, update, compute_norm))
 
-        if self.sync_cuda:
-            torch.cuda.synchronize()
-        m2 = torch.cuda.max_memory_allocated()
-        t2 = time.time()
+            if self.sync_cuda:
+                torch.cuda.synchronize()
+            m2 = torch.cuda.max_memory_allocated()
+            t2 = time.time()
 
-        metrics['memory'] = get_memory_used() / MB
-        metrics['forward_time'] = t1 - t0
-        metrics['forward_gpu'] = m1 / MB
-        metrics['backward_time'] = t2 - t1
-        metrics['backward_gpu'] = m2 / MB
+            ## log metrics to wandb ##
+            mems.append(get_memory_used()/MB)
+            forward_durations.append(t1-t0)
+            backward_durations.append(t2-t1)
+            forward_gpus.append(m1/MB)
+            backward_gpus.append(m2/MB)
+
+        metrics['memory'] = np.mean(mems)
+        metrics['forward_time'] = np.mean(forward_durations)
+        metrics['forward_gpu'] = np.mean(forward_gpus)
+        metrics['backward_time'] = np.mean(backward_durations)
+        metrics['backward_gpu'] = np.mean(backward_gpus)
         self.insert_metrics(idx, metrics)
 
         metrics = self.metrics.loc[idx]
@@ -625,7 +673,7 @@ class GenerativeSolver(nn.Module):
             grad_norm = metrics['gen_grad_norm']
             assert not np.isnan(grad_norm), 'generator gradient is nan'
             assert not np.isclose(0, grad_norm), 'generator gradient is zero'
-
+        
         return metrics
 
     def test_model(self, n_batches, model_type, fit_atoms=False):
@@ -636,13 +684,13 @@ class GenerativeSolver(nn.Module):
         '''
         valid_model_types = {'gen'}
 
-        for i in range(n_batches):
-            torch.cuda.reset_max_memory_allocated()
+        for i,d in enumerate(tqdm(self.test_data)):
+            torch.cuda.reset_peak_memory_stats()
             t0 = time.time()
 
             grid_type = self.get_gen_grid_phase(i, test=True)
             loss, metrics = self.gen_forward(
-                data=self.test_data,
+                data=d,
                 grid_type=grid_type,
                 fit_atoms=fit_atoms
             )
@@ -656,15 +704,17 @@ class GenerativeSolver(nn.Module):
             )
             self.insert_metrics(idx, metrics)
 
-            # log metrics to wandb
-            if self.use_wandb:
-                wandb_metrics = metrics.copy()
-                wandb_metrics.update(dict(zip(self.index_cols, idx)))
-                wandb.log(wandb_metrics)
+        # log metrics to wandb
+        if self.use_wandb:
+            wandb_metrics = metrics.copy()
+            wandb_metrics = OrderedDict((f'test_{k}', v) for k, v in wandb_metrics.items())
+            wandb_metrics.update(dict(zip(self.index_cols, idx)))
+            wandb.log(wandb_metrics)
 
         idx = idx[:-1]
         metrics = self.metrics.loc[idx].mean()
         self.print_metrics(idx, metrics)
+        self.test_iter += 1
 
     def test_models(self, n_batches, fit_atoms):
         '''
@@ -685,7 +735,7 @@ class GenerativeSolver(nn.Module):
         its parameters.
         '''
         valid_model_types = {'gen'}
-
+        metrics_list = pd.DataFrame()
         for i in range(n_iters):
             batch_idx = 0 if update else i
 
@@ -697,6 +747,25 @@ class GenerativeSolver(nn.Module):
                 compute_norm=compute_norm,
                 batch_idx=batch_idx
             )
+            metrics_list = pd.concat([metrics_list, metrics])
+
+
+        metrics = metrics_list.mean(axis=1)
+        metrics['memory'] = get_memory_used() / MB
+        metrics['forward_gpu'] = torch.cuda.max_memory_allocated() / MB
+        idx = (
+            self.gen_iter, self.disc_iter,
+            'train', model_type, grid_type, i
+        )
+        self.insert_metrics(idx, metrics)
+
+        # log metrics to wandb
+        if self.use_wandb:
+            wandb_metrics = metrics.copy()
+            wandb_metrics = OrderedDict((f'train_{k}', v) for k, v in wandb_metrics.items())
+            wandb_metrics.update(dict(zip(self.index_cols, idx)))
+            wandb.log(wandb_metrics)
+        self.gen_iter += 1
 
     def train_models(self, update=True, compute_norm=False):
         '''
@@ -709,6 +778,7 @@ class GenerativeSolver(nn.Module):
             update=update,
             compute_norm=compute_norm
         )
+        self.save_metrics()
 
     @save_on_exception
     def train_and_test(
@@ -730,13 +800,13 @@ class GenerativeSolver(nn.Module):
  
             # save model and optimizer states
             if last_save != i and divides(save_interval, i):
-                self.save_state()
                 last_save = i
 
             # test models on test data
             if last_test != i and divides(test_interval, i):
                 fit_atoms = (fit_interval > 0 and divides(fit_interval, i))
                 self.test_models(n_batches=n_test_batches, fit_atoms=fit_atoms)
+                self.save_state()
                 last_test = i
 
             # train models on training data

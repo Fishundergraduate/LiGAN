@@ -2,7 +2,7 @@ import sys, os, re, time
 import pandas as pd
 from openbabel import openbabel as ob
 import torch
-from torch import nn, utils
+from torch import Tensor, nn, tensor, utils
 
 import molgrid
 from . import atom_types, atom_structs, atom_grids
@@ -20,6 +20,11 @@ from torchdata import datapipes
 from glob import glob
 from rdkit import RDLogger, Chem
 
+from torch_geometric.utils import smiles, dense_to_sparse
+from Bio.PDB import PDBParser
+from scipy.spatial.distance import cdist
+import torch
+import periodictable as pt
 # RDKitのエラーメッセージを無効にする
 RDLogger.DisableLog('rdApp.*')
 gs = Graphsite()
@@ -96,36 +101,128 @@ def getDataLoader(datarootDir:str,batch_size:int,train_ratio=0.8):
     return DataLoader(__train_pipe,batch_size=batch_size,shuffle=False), DataLoader(__test_pipe, batch_size)
 
 class biDataset(utils.data.Dataset):
-    def __init__(self, datarootDir:str):
-        pock_path = glob(datarootDir+"/pocket-data/*00")
-        pockID = [x.split("/")[-1][:5] for x in pock_path]
-        mol2_path = [x+"/"+x.split("/")[-1]+".mol2" for x in pock_path]
-        __sdf_path = [x.split(".")[0]+".sdf" for x in mol2_path]
-        lig_smi = [convert_to_smiles(x) for x in __sdf_path] # Nullable List
-        dataA = pd.DataFrame({"pockID":pockID,"mol2_path":mol2_path,"lig_smi":lig_smi})
+    def __init__(self, datarootDir:str, cut_size: int = 5, device:str="cuda"):
+        merged_data = pd.DataFrame()
+        for cut_size in {5,7,10}:
+            mol2_path = glob(datarootDir+f"/receptor/receptor_near_ligand_{cut_size}.mol2")[0]
+
+            lig_path = glob(datarootDir+"/ligands/*.sdf")
+            lig_smi = [convert_to_smiles(x) for x in lig_path] # Nullable List
+            ligID = [os.path.splitext(os.path.basename(x))[0] for x in lig_path]
+            dataB = pd.DataFrame({"ligID":ligID,"lig_smi":lig_smi})
 
 
-        prot_path = glob(datarootDir+"/protein-data-part1/*")+glob(datarootDir+"/protein-data-part2/*")
-        protID = [x.split("/")[-1] for x in prot_path]
-        profile_path = [x+"/"+x.split("/")[-1]+".profile" for x in prot_path]
-        pops_path = [x.split(".")[0]+".pops" for x in profile_path]
-        dataB = pd.DataFrame({"protID":protID,"profile_path":profile_path,"pops_path":pops_path})
-        # DataFrameを結合
-        merged_data = pd.merge(dataA, dataB, left_on='pockID', right_on='protID')
-        merged_data = merged_data.dropna()
-        merged_data = merged_data.drop(columns=['pockID','protID'])
+            pops_path = glob(datarootDir+f"/protein/receptor.pops")[0]
+            
+            profile_path = glob(datarootDir+f"/protein/receptor.profile")[0]
+            # DataFrameを結合
+            # DataFrameを結合
+            dataB['mol2_path'] = mol2_path
+            dataB['pops_path'] = pops_path
+            dataB['profile_path'] = profile_path
+            dataB = dataB.dropna()
+            dataB = dataB.drop(columns=['ligID'])
+            merged_data = pd.concat([merged_data,dataB], axis=0)
         self.data = merged_data
-        #lig_graph = [create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(x) for x in lig_smi]
-        #prot_graph = [gs(mol_path=mol2path,profile_path=profilepath,pop_path=popspath) for mol2path,profilepath,popspath in zip(mol2_path,profile_path,pops_path)]
+        self.device = device
+        self.smiles_graph , error_list= self.smiles2graphlist(self.data['lig_smi'])
+        self.data = self.data[~self.data['lig_smi'].isin(error_list)]
+        self.prot_graph, error_list = self.prot2graphlist(self.data['mol2_path'],self.data['profile_path'],self.data['pops_path'])
+        self.data = self.data[~self.data['mol2_path'].isin(error_list)]
 
     def __len__(self):
         return len(self.data)
-    
     def __getitem__(self, idx):
-        lig_graph = create_pytorch_geometric_graph_data_list_from_smiles_and_labels_single(self.data.iloc[idx]['lig_smi']) #TODO: y to be filled
-        node,edge,attr = gs(mol_path=self.data.iloc[idx]['mol2_path'],profile_path=self.data.iloc[idx]['profile_path'],pop_path=self.data.iloc[idx]['pops_path'])
-        prot_graph = Data(x=node,edge_index=edge,edge_attr=attr)#,y=torch.tensor([0.0]))
-        return prot_graph, lig_graph
+        lig_graph = self.smiles_graph[idx]
+        prot_graph = self.prot_graph[idx]
+
+        return lig_graph, prot_graph 
+
+    def smiles2graphlist(self, smiles_list):
+        """
+        This function takes a list of SMILES strings as input.
+        It then attempts to convert each SMILES string into a graph.
+        If the conversion is successful, the graph is added to the success_list.
+        If the conversion fails (for example, if an invalid SMILES string is provided), the SMILES string is added to the error_list.
+        The function ultimately returns two lists: success_list and error_list.
+        """
+        success_list = list()
+        error_list = list()
+        for smi in smiles_list:
+            try:
+                d = smiles.from_smiles(smi)
+                d = Data(
+                    x=d.x.to(torch.float32),
+                    edge_index=d.edge_index.to(torch.long),
+                    edge_attr=d.edge_attr.to(torch.float32),
+                    smiles = d.smiles)
+                success_list.append(d)
+            except:
+                error_list.append(smi)
+        return success_list, error_list
+    
+    def prot2graphlist(self, mol2_path_list, profile_path_list, pops_path_list):
+        """
+        This function takes a list of paths to mol2 files, a list of paths to profile files, and a list of paths to pops files as input.
+        It then attempts to convert each mol2 file, profile file, and pops file into a graph.
+        If the conversion is successful, the graph is added to the success_list.
+        If the conversion fails (for example, if an invalid mol2 file, profile file, or pops file is provided), the paths to the mol2 file, profile file, and pops file are added to the error_list.
+        The function ultimately returns two lists: success_list and error_list.
+        """
+        success_list = list()
+        error_list = list()
+        for mol2_path, profile_path, pops_path in zip(mol2_path_list, profile_path_list, pops_path_list):
+            try:
+                d = gs(mol_path=mol2_path,profile_path=profile_path,pop_path=pops_path)
+                d = Data(
+                    x=torch.from_numpy(d[0]).to(torch.float32),
+                    edge_index=torch.from_numpy(d[1]).to(torch.long),
+                    edge_attr=torch.from_numpy(d[2]).to(torch.float32),
+                    y=torch.tensor([0.0]).to(torch.float32))
+                success_list.append(d)
+            except:
+                error_list.append([mol2_path])
+        return success_list, error_list
+
+@staticmethod
+def convert_to_original_data(data):
+    return Data(
+        x=data.x.to(torch.long),
+        edge_index=data.edge_index.to(torch.long),
+        edge_attr=data.edge_attr.to(torch.long),
+    )
+
+
+@staticmethod
+def convert_to_edge_attr(adj_matrix:Tensor):
+    assert adj_matrix.shape[-1] == 3, "adj_matrix should be 3D tensor"
+    edge_bondtype = dense_to_sparse(adj_matrix[:,:,0])
+    edge_stereomer = dense_to_sparse(adj_matrix[:,:,1])
+    edge_conjugated = dense_to_sparse(adj_matrix[:,:,2])
+
+    edge_attr_stereo = torch.zeros_like(edge_bondtype[1])
+    edge_attr_conjugated = torch.zeros_like(edge_bondtype[1])
+
+    if edge_stereomer[0].shape[-1] > 0:
+        for i in range(edge_stereomer[0].shape[-1]):
+            mask = (edge_bondtype[0][0] == edge_stereomer[0][0][i]) & (edge_bondtype[0][1] == edge_stereomer[0][1][i])
+            mask_list = mask.nonzero(as_tuple=True)[0].tolist()
+            for idx in mask_list:
+                edge_attr_stereo[idx] = edge_stereomer[1][i]
+    if edge_conjugated[0].shape[-1] > 0:
+        for i in range(edge_conjugated[0].shape[-1]):
+            mask = (edge_bondtype[0][0] == edge_conjugated[0][0][i]) & (edge_bondtype[0][1] == edge_conjugated[0][1][i])
+            mask_list = mask.nonzero(as_tuple=True)[0].tolist()
+            for idx in mask_list:
+                edge_attr_conjugated[idx] = edge_conjugated[1][i]
+    edge_attr = torch.stack([
+        edge_bondtype[1],
+        edge_attr_stereo,
+        edge_attr_conjugated
+    ])
+    return edge_bondtype[0], edge_attr.T
+
+
 
 
 class MolDataset(utils.data.IterableDataset):
@@ -697,3 +794,39 @@ def convert_to_smiles(input_sdf)->str:
     suppl = Chem.SDMolSupplier(input_sdf)
     mols = [x for x in suppl if x is not None]
     return Chem.MolToSmiles(mols[0]) if len(mols)!=0 else None
+
+def extract_options_from_sdf(sdf_file_path)->list[float]:
+    # SDFファイルを読み込む
+    supplier = Chem.SDMolSupplier(sdf_file_path)
+
+    options_list = []
+
+    # 各分子の情報を抽出
+    for mol in supplier:
+        if mol is not None:
+            # 分子の全てのプロパティを取得
+            options = {}
+            for prop_name in mol.GetPropNames():
+                prop_value = mol.GetProp(prop_name)
+                options[prop_name] = prop_value
+
+            options_list.append(options)
+
+    return options_list
+
+def pdb_to_graph(pdb_file, threshold=5.0):
+    """
+        Returns node_feature and edge_index
+        #TODO: atom_feature should be extended
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure('protein', pdb_file)
+    model = structure[0]
+    atoms = list(model.get_atoms())
+    coords = np.array([atom.get_coord() for atom in atoms])
+    features = np.array([pt.elements.symbol(atom.element).number for atom in atoms])
+    distance_matrix = cdist(coords, coords)
+    edge_index = np.argwhere(distance_matrix <= threshold)
+    return features, edge_index
+    data = Data(x=torch.tensor(features, dtype=torch.float).view(-1, 1), edge_index=torch.tensor(edge_index, dtype=torch.long).t().contiguous())
+    return data

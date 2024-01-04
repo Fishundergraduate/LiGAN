@@ -1,19 +1,26 @@
 import sys
+from turtle import forward
 
-from git import Object
+import torch_geometric
 import numpy as np
 from scipy import stats
 import torch
-from torch import nn
-from .interpolation import Interpolation
-from torch_geometric.nn import GCNConv
+from torch import Tensor, nn
+from torch.nn import functional as F
 
+from zmq import device
+from .interpolation import Interpolation
+from torch_geometric.nn import GATConv, pool, GCNConv
+from torch_geometric.data import Data, Batch
 # mapping of unpool_types to Upsample modes
 unpool_type_map = dict(
     n='nearest',
     t='trilinear',
 )
 
+#for debug
+from torch.autograd import set_detect_anomaly
+set_detect_anomaly(True)
 
 def as_list(obj):
     return obj if isinstance(obj, list) else [obj]
@@ -102,9 +109,10 @@ def sample_latent(
     # draw samples from standard normal distribution
     if not truncate:
         #print('Drawing latent samples from normal distribution')
-        latents = torch.randn((batch_size, n_latent), device=device)
+        latents = torch.normal(means, log_stds.exp()).to(device)
     else:
         #print('Drawing latent samples from truncated normal distribution')
+        assert NotImplementedError
         latents = torch.as_tensor(stats.truncnorm.rvs(
             a=-truncate,
             b=truncate,
@@ -153,7 +161,7 @@ class Conv2dReLU(nn.Sequential):
     Spectral normalization is applied by indicating
     the number of power iterations (spectral_norm).
     '''
-    conv_type = GCNConv
+    conv_type = GATConv
 
     def __init__(
         self,
@@ -164,7 +172,7 @@ class Conv2dReLU(nn.Sequential):
         batch_norm=False,
         spectral_norm=False,
     ):
-        modules = [
+        self.modules = [
             self.conv_type(
                 in_channels=n_channels_in,
                 out_channels=n_channels_out,
@@ -176,17 +184,21 @@ class Conv2dReLU(nn.Sequential):
         ]
 
         if batch_norm > 0: # value indicates order wrt conv and relu
-            modules.insert(batch_norm, nn.BatchNorm2d(n_channels_out))
+            self.modules.insert(batch_norm, nn.BatchNorm2d(n_channels_out))
 
         if spectral_norm > 0: # value indicates num power iterations
-            modules[0] = nn.utils.spectral_norm(
-                modules[0], n_power_iterations=spectral_norm
+            self.modules[0].lin_src = nn.utils.spectral_norm(
+                self.modules[0].lin_src, n_power_iterations=spectral_norm
             )
 
-        super().__init__(*modules)
+        super().__init__(*(self.modules))
+    
+    def forward(self, data):
+        x = self.modules[0](data.x,data.edge_index,data.edge_attr)
+        x = self.modules[1](x)
+        return Data(x=x, edge_index=data.edge_index, edge_attr=data.edge_attr, y = data.y)
 
-
-class TConv2dReLU(Conv2dReLU):
+class TConv2dReLU(nn.Sequential):
     '''
     A 2d transposed convolution layer and leaky ReLU.
 
@@ -196,8 +208,42 @@ class TConv2dReLU(Conv2dReLU):
     Spectral normalization is applied by indicating
     the number of power iterations (spectral_norm).
     '''
-    conv_type = nn.ConvTranspose2d
+    #TODO: transpose convolution
+    conv_type = nn.Linear
+    def __init__(
+        self,
+        n_channels_in,
+        n_channels_out,
+        kernel_size=3,
+        relu_leak=0.1,
+        batch_norm=False,
+        spectral_norm=False,
+    ):
+        self.modules = [
+            self.conv_type(
+                in_features=n_channels_in,
+                out_features=n_channels_out,
+            ),
+            nn.ReLU(
+                inplace=True,
+            )
+        ]
 
+        if batch_norm > 0: # value indicates order wrt conv and relu
+            self.modules.insert(batch_norm, nn.BatchNorm2d(n_channels_out))
+
+        if False:
+            self.modules[0] = nn.utils.spectral_norm(
+                self.modules[0], n_power_iterations=spectral_norm
+            )
+
+        super().__init__(*(self.modules))
+    
+    def forward(self, data):
+        #import ipdb; ipdb.set_trace()
+        x = self.modules[0](data.x).relu()
+        data.x = x
+        return data
 
 class Conv2dBlock(nn.Module):
     '''
@@ -357,7 +403,8 @@ class Conv2dBlock(nn.Module):
             
             if self.residual:
                 identity = self.skip_conv(inputs) if i == 0 else inputs
-                outputs = f(inputs) + identity
+                outputs = f(inputs)
+                outputs.x = outputs.x + identity.x
             else:
                 outputs = f(inputs)
 
@@ -373,12 +420,177 @@ class Conv2dBlock(nn.Module):
         return outputs
 
 
-class TConv2dBlock(Conv2dBlock):
+class TConv2dBlock(nn.Module):
     '''
     A sequence of n_convs TConvReLUs with the same settings.
     '''
     conv_type = TConv2dReLU
 
+    def __init__(
+        self,
+        n_convs,
+        n_channels_in,
+        n_channels_out,
+        block_type='c',
+        growth_rate=8,
+        bottleneck_factor=0,
+        debug=False,
+        **kwargs
+    ):
+        super().__init__()
+
+        assert block_type in {'c', 'r', 'd'}, block_type
+        self.residual = (block_type == 'r')
+        self.dense = (block_type == 'd')
+
+        if self.residual:
+            self.init_skip_conv(
+                n_channels_in=n_channels_in,
+                n_channels_out=n_channels_out,
+                **kwargs
+            )
+
+        if self.dense:
+            self.init_final_conv(
+                n_channels_in=n_channels_in,
+                n_convs=n_convs,
+                growth_rate=growth_rate,
+                n_channels_out=n_channels_out,
+                **kwargs
+            )
+            n_channels_out = growth_rate
+
+        self.init_conv_sequence(
+            n_convs=n_convs,
+            n_channels_in=n_channels_in,
+            n_channels_out=n_channels_out,
+            bottleneck_factor=bottleneck_factor, 
+            **kwargs
+        )
+
+    def init_skip_conv(
+        self, n_channels_in, n_channels_out, kernel_size, **kwargs
+    ):
+        self.skip_conv = nn.Identity()
+
+    def init_final_conv(
+        self,
+        n_channels_in,
+        n_convs,
+        growth_rate,
+        n_channels_out,
+        kernel_size,
+        **kwargs
+    ):
+        # 1x1x1 final "compression" convolution
+        self.final_conv = self.conv_type(
+            n_channels_in=n_channels_in + n_convs*growth_rate,
+            n_channels_out=n_channels_out,
+            kernel_size=1,
+            **kwargs
+        )
+
+    def bottleneck_conv(
+        self,
+        n_channels_in,
+        n_channels_bn,
+        n_channels_out,
+        kernel_size,
+        **kwargs
+    ):
+        assert n_channels_bn > 0, \
+            (n_channels_in, n_channels_bn, n_channels_out)
+
+        return nn.Sequential(
+            self.conv_type(
+                n_channels_in=n_channels_in,
+                n_channels_out=n_channels_bn,
+                kernel_size=1,
+                **kwargs,
+            ),
+            self.conv_type(
+                n_channels_in=n_channels_bn,
+                n_channels_out=n_channels_bn,
+                kernel_size=kernel_size,
+                **kwargs
+            ),
+            self.conv_type(
+                n_channels_in=n_channels_bn,
+                n_channels_out=n_channels_out,
+                kernel_size=1,
+                **kwargs,
+            )
+        )
+
+    def init_conv_sequence(
+        self,
+        n_convs,
+        n_channels_in,
+        n_channels_out,
+        bottleneck_factor,
+        **kwargs
+    ):
+        self.conv_modules = []
+        for i in range(n_convs):
+
+            if bottleneck_factor: # bottleneck convolution
+                conv = self.bottleneck_conv(
+                    n_channels_in=n_channels_in,
+                    n_channels_bn=n_channels_in//bottleneck_factor,
+                    n_channels_out=n_channels_out,
+                    **kwargs
+                )
+            else: # single convolution
+                conv = self.conv_type(
+                    n_channels_in=n_channels_in,
+                    n_channels_out=n_channels_out,
+                    **kwargs
+                )
+            self.conv_modules.append(conv)
+            self.add_module(str(i), conv)
+
+            if self.dense:
+                n_channels_in += n_channels_out
+            else:
+                n_channels_in = n_channels_out
+
+    def __len__(self):
+        return len(self.conv_modules)
+
+    def forward(self, inputs):
+        if torch.isnan(inputs.x).any():
+            import ipdb; ipdb.set_trace()
+            pass
+
+        if not self.conv_modules:
+            return inputs
+
+        if self.dense:
+            all_inputs = [inputs]
+
+        # convolution sequence
+        for i, f in enumerate(self.conv_modules):
+            
+            if self.residual:
+                identity = self.skip_conv(inputs) if i == 0 else inputs
+                outputs = f(inputs)
+                outputs.x = outputs.x + identity.x
+            else:
+                outputs = f(inputs)
+            if torch.isnan(outputs.x).any():
+                import ipdb; ipdb.set_trace()
+                pass
+
+            if self.dense:
+                all_inputs.append(outputs)
+                inputs = torch.cat(all_inputs, dim=1)
+            else:
+                inputs = outputs
+
+        if self.dense:
+            outputs = self.final_conv(inputs)
+
+        return outputs
 
 class Pool2d(nn.Sequential):
     '''
@@ -424,7 +636,7 @@ class Unpool2d(nn.Sequential):
     transposed convolution (unpool_type=c).
     '''
     def __init__(self, n_channels, unpool_type, unpool_factor):
-
+        """ import ipdb; ipdb.set_trace()
         if unpool_type in unpool_type_map:
             
             unpool = nn.Upsample(
@@ -443,10 +655,14 @@ class Unpool2d(nn.Sequential):
             )
 
         else:
-            raise ValueError('unknown unpool_type ' + repr(unpool_type))
+            raise ValueError('unknown unpool_type ' + repr(unpool_type)) """
+        super().__init__()
+        self.unpool = nn.Identity()
 
-        super().__init__(unpool)
 
+    def forward(self, input: Data):
+        #import ipdb; ipdb.set_trace()
+        return input if isinstance(input, Data) else Data(x=input)
 
 class Reshape(nn.Module):
     '''
@@ -488,30 +704,37 @@ class Grid2Vec(nn.Sequential):
 
         super().__init__(*modules)
 
-class Graph2Vec(nn.Sequential):
+class Graph2Vec(nn.Module):
     def __init__(self, in_shape, n_output, activ_fn=None, spectral_norm=0):
+        super().__init__()
         n_input = int(np.prod(in_shape))
-        modules = [
-            GCNConv(n_input, n_output)
-        ]
+        self.gcn = GATConv(n_input, n_output)
+        self.activ_fn = activ_fn 
 
-        if activ_fn:
-            modules.append(activ_fn)
-
-        super().__init__(*modules)
-
+    def forward(self, data:Data):
+        x = self.gcn(data.x,data.edge_index,data.edge_attr)
+        if self.activ_fn:
+            x = self.activ_fn(x.to("cuda"), data.edge_index)
+        return Data(x=x, edge_index=data.edge_index, edge_attr=data.edge_attr, y = data.y)
 class Vec2Graph(nn.Sequential):
     def __init__(self, n_input, out_shape, relu_leak, batch_norm, spectral_norm):
+        super().__init__()
         n_output = int(np.prod(out_shape))
-        modules = [
-            GCNConv(n_input, n_output),
-            nn.LeakyReLU(negative_slope=relu_leak, inplace=True),
-        ]
-
+        self.fc1 = nn.Linear(n_input, n_output)
+        self.relu = nn.LeakyReLU(negative_slope=relu_leak, inplace=True)
+        
         if batch_norm > 0:
-            modules.insert(batch_norm+1, nn.BatchNorm2d(out_shape[0]))
-
-        super().__init__(*modules)
+            self.batch_norm = nn.BatchNorm2d(out_shape[0])
+        else:
+            self.batch_norm = None
+    
+    def forward(self, data:Data):
+        x = self.fc1(data.x)
+        x = self.relu(x)
+        if self.batch_norm:
+            x = self.batch_norm(x)
+        data.x = x
+        return data
 
 class Vec2Grid(nn.Sequential):
     '''
@@ -579,7 +802,6 @@ class GridEncoder(nn.Module):
 
         # track changing grid dimensions
         self.n_channels = n_channels
-
         """ if init_conv_pool:
 
             self.add_conv2d(
@@ -632,7 +854,6 @@ class GridEncoder(nn.Module):
 
         self.n_tasks = len(n_output)
         self.task_modules = []
-
         for i, (n_output_i, activ_fn_i) in enumerate(
             zip(n_output, output_activ_fn)
         ):
@@ -690,22 +911,23 @@ class GridEncoder(nn.Module):
         self.print(name, self.n_channels)
 
     def forward(self, inputs):
-
         # conv-pool sequence
         conv_features = []
         for f in self.grid_modules:
-
-            outputs = f(inputs)
-            self.print(inputs.shape, '->', f, '->', outputs.shape)
+            
+            if not isinstance(f, Pool2d):
+                outputs = f(inputs)
+            else:
+                outputs = pool.avg_pool_neighbor_x(inputs) #TODO: add to max_pool_neighbor_x
+            self.print(inputs.x.shape, '->', f, '->', outputs.x.shape)
 
             if not isinstance(f, Pool2d):
                 conv_features.append(outputs)
             inputs = outputs
-
         # fully-connected outputs
         outputs = [f(inputs) for f in self.task_modules]
-        outputs_shape = [o.shape for o in outputs]
-        self.print(inputs.shape, '->', self.task_modules, '->', outputs_shape)
+        #outputs_shape = [o.x.shape for o in outputs]
+        #self.print(inputs.x.shape, '->', self.task_modules, '->', outputs_shape)
 
         return reduce_list(outputs), conv_features
 
@@ -876,28 +1098,61 @@ class GridDecoder(nn.Module):
         self.n_channels = n_filters
         self.print(name, self.n_channels)
 
-    def forward(self, inputs, skip_features=None):
-
+    def forward(self, inputs:Tensor, skip_features=None):
         for f in self.fc_modules:
             outputs = f(inputs)
-            self.print(inputs.shape, '->', f, '->', outputs.shape)
+            self.print(inputs.x.shape, '->', f, '->', outputs.x.shape)
+            if torch.isnan(outputs.x).any():
+                import ipdb; ipdb.set_trace()
+                pass
             inputs = outputs
 
         for f in self.grid_modules:
 
             if self.skip_connect and isinstance(f, TConv2dBlock):
                 skip_inputs = skip_features.pop()
-                inputs = torch.cat([inputs, skip_inputs], dim=1)
-                inputs_shape = [inputs.shape, skip_inputs.shape]
+                batched_list = []
+                for i in range(inputs.batch.max().int()+1):
+                    skip_tens = torch.cat([skip_inputs[i].x, torch.zeros([inputs[i].x.shape[0] - skip_inputs[i].x.shape[0] % inputs[i].x.shape[0], skip_inputs[i].x.shape[1]], device=inputs[i].x.device)])
+                    skip_tens = skip_tens.view(inputs[i].x.shape[0], -1, skip_tens.shape[1]).mean(dim=1)
+                    input_tens = torch.cat([inputs[i].x,skip_tens], dim=1)
+                    inputs_shape = [inputs[i].x.shape, skip_tens.shape]
+                    batched_list.append(Data(x = input_tens, batch = inputs[i].batch, device=inputs[i].x.device, num_nodes = inputs[i].num_nodes))
+                inputs = Batch.from_data_list(batched_list)
             else:
-                inputs_shape = inputs.shape
+                    inputs_shape = inputs.x.shape
 
             outputs = f(inputs)
-            self.print(inputs_shape, '->', f, '->', outputs.shape)
+            self.print(inputs_shape, '->', f, '->', outputs.x.shape)
+            if torch.isnan(outputs.x).any():
+                import ipdb; ipdb.set_trace()
+                pass
             inputs = outputs
-
         return outputs
 
+class AdjDecoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fc1 = nn.Linear(3,12)
+        self.fc2 = nn.Linear(12,24)
+        self.fc3 = nn.Linear(24,12)
+        self.fc4 = nn.Linear(12,3)
+        self.dropout = nn.Dropout(0.5)
+
+    def forward(self, data:Batch):
+        x = self.fc1(data.x)
+        x = torch.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = torch.relu(x)
+        x = self.dropout(x)
+        x = self.fc3(x)
+        x = torch.relu(x)
+        x = self.dropout(x)
+        x = self.fc4(x)
+        x = torch.relu(x)
+        data.x = x
+        return data
 
 class GridGenerator(nn.Sequential):
     '''
@@ -999,6 +1254,8 @@ class GridGenerator(nn.Sequential):
                 debug=debug,
             )
 
+        self.attr_decoder = AdjDecoder()
+
         n_pools = n_levels - 1 + init_conv_pool
 
         self.decoder = GridDecoder(
@@ -1078,21 +1335,53 @@ class CVAE(GridGenerator):
     has_conditional_encoder = True
 
     def forward(
-        self, inputs=None, conditions=None, batch_size=None, **kwargs
+        self, inputs=None, conditions=None, batch_size=1, **kwargs
     ):
+        if inputs.batch is not None:
+            batch_size = inputs.batch.max().item() + 1
         if inputs is None: # prior
+            assert NotImplementedError
             means, log_stds = None, None
+            in_latents = self.sample_latent(batch_size, means.x, log_stds.x, **kwargs)
         else: # posterior
             (means, log_stds), _ = self.input_encoder(inputs)
-
-        in_latents = self.sample_latent(batch_size, means, log_stds, **kwargs)
+            in_latents = torch.normal(means.x, log_stds.x.exp())
         cond_latents, cond_features = self.conditional_encoder(conditions)
-        cat_latents = torch.cat([in_latents, cond_latents], dim=1)
-
+        
+        # concatenate input and conditional latents
+        batch_cond_lat = cond_latents.x.mean(dim=0,keepdim=True).repeat(in_latents.shape[0], 1)        
+        cat_latents = torch.cat([in_latents, batch_cond_lat], dim=1)
+        batch_inds = torch.arange(batch_size, device=self.device)
+        num_nodes_list = [inputs[i].num_nodes for i in range(batch_size)]
+        max_num_nodes = max(num_nodes_list)
+        starts = np.cumsum([0] + num_nodes_list[:-1])
+        ends = np.cumsum(num_nodes_list)
+        indices = list(zip(starts, ends))
+        latent_vecs = [cat_latents[start: end] for start,end in indices]
+        vecs_data_list = [Data(x=latent_vecs[i], batch=batch_inds[i], num_nodes = num_nodes_list[i], device = latent_vecs[i].device) for i in range(batch_size)]
+        batched_vecs = Batch.from_data_list(vecs_data_list)
+        
+        in_latents_tens = in_latents @ in_latents.T
+        in_latents_stacked = [F.pad(in_latents_tens[start:end, start:end].unsqueeze(-1).repeat(1, 1, 3), (0, 0, 0, max_num_nodes - (end - start), 0, max_num_nodes - (end - start)), "constant", 0) for start, end in indices] # 3 for 3 channels in edge_attr
+        in_vecs_data_list = [Data(x=in_latents_stacked[i], batch=batch_inds[i], num_nodes = num_nodes_list[i], device = in_latents_stacked[i].device) for i in range(batch_size)]
+        batched_in_vecs = Batch.from_data_list(in_vecs_data_list)
+        adj_matr = self.attr_decoder(batched_in_vecs)
+        
+        ## TODO: conditions should be batched
+        num_nodes_list = [conditions[i].num_nodes for i in range(batch_size)]
+        max_num_nodes = max(num_nodes_list)
+        batch_cond = []
+        for feat in cond_features:
+            single_cond_feat = []
+            for i in range(batch_size):
+                __myx = F.pad(feat.x.mean(dim=0,keepdim=True).repeat(num_nodes_list[i], 1), (0, 0, 0, max_num_nodes - num_nodes_list[i]), "constant", 0)
+                single_cond_feat.append(Data(x=__myx, batch=batch_inds[i], num_nodes = num_nodes_list[i], device = feat.x.device))
+            batch_cond.append(Batch.from_data_list(single_cond_feat))
         outputs = self.decoder(
-            inputs=cat_latents, skip_features=cond_features
+            inputs=batched_vecs, skip_features=batch_cond
         )
-        return outputs, in_latents, means, log_stds
+
+        return outputs, adj_matr, means, log_stds
 
 """ class CVAE2(nn.Module):
     def __init__(self, in_channel, out_channel) -> None:
@@ -1100,4 +1389,4 @@ class CVAE(GridGenerator):
         self.in_channel = in_channel
         self.out_channel = out_channel
 
-        self.conv1 = GCNConv(in_channel, 2*out_channel) """
+        self.conv1 = GATConv(in_channel, 2*out_channel) """

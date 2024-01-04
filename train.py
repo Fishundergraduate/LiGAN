@@ -50,7 +50,7 @@ def main(argv):
     solver_type = getattr(ligan.training, solver_type)
     solver = solver_type(
         data_kws=config['data'],
-        wandb_kws=config.get('wandb', {'use_wandb': False}),
+        wandb_kws=config.get('wandb', {'use_wandb': True}),
         gen_model_kws=config['gen_model'],
         disc_model_kws=config.get('disc_model', {}),
         prior_model_kws=config.get('prior_model', {}),

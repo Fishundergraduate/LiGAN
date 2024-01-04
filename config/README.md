@@ -87,4 +87,143 @@ output:
 
 ### train.config
 
-TODO
+```
+out_prefix: <str: set output file prefix of generative model or optimizer>
+model_type: <str: switch Architechture of the NN model, in this case we only implemented to CVAE.>
+random_seed:  <int: seed for random number generation>
+caffe_init: False # Not to use
+continue: False # Not to use
+max_n_iters: <int: max iteration of training epoches>
+balance: False # Not to use
+device: <str: specify gpu device (on GOJO, cuda:0 to cuda:2 // on suzuki_local, cuda:0 only)>
+
+data:
+  data_root: /mnt/d/Documents_2023/crossdock2020_full/ # Not to use
+  batch_size: <int:  training examples utilized in one iteration. commonly use the power of 2>
+  rec_typer: oadc-1.0 # Not to use
+  lig_typer: oadc-1.0 # Not to use
+  use_rec_elems: True # Not to use
+  resolution: 0.5 # Not to use
+  grid_size: 48 # Not to use
+  shuffle: True # Not to use
+  random_rotation: True # Not to use
+  random_translation: 2.0 # Not to use
+  train_file: <path: specify the location of raw full-data>
+  test_file: _ # Not to use
+  train_ratio: <float: train-test ratio>
+  prepared_dataset: <bool: if prepared dataset with pickle, this param should be True>
+  train_dataset: <path: specity the location of prepared train dataset>
+  test_dataset: <path: location of prepared test dataset>
+  cut_size: # Not to use
+
+gen_model:
+  n_filters: # Not to use
+  width_factor: # Not to use
+  n_levels: <int: how many blocks in the architechture>
+  conv_per_level: <int: how many layers in a single block>
+  kernel_size: 3 # Not to use
+  relu_leak: 0.1 # Not to use
+  batch_norm: 0 # Not to use
+  spectral_norm: <int: determine spectral normalization is required or not>
+  pool_type: <a, m: pooling type average or max>
+  unpool_type: 'n' # Not to use
+  pool_factor: 2 # Not to use
+  n_latent: <int: the size of latent space>
+  init_conv_pool: 0 # Not to use
+  skip_connect: <bool: the model have `skip_connection` or not>
+  block_type: r # Not to use
+  growth_rate: 0 # Not to use
+  bottleneck_factor: 0 # Not to use
+
+disc_model: # Not to use
+  n_filters: 0
+  width_factor: 2
+  n_levels: 0
+  conv_per_level: 0
+  kernel_size: 3
+  relu_leak: 0.1
+  batch_norm: 0
+  spectral_norm: 1
+  pool_type: a
+  pool_factor: 2
+  n_output: 1
+  init_conv_pool: 0
+  block_type: r
+  growth_rate: 0
+  bottleneck_factor: 0
+
+loss_fn:
+
+  types: # FIX THIS CODE
+    recon_loss: '2'
+    gan_loss: 'w'
+    recon2_loss: 'c'
+
+  weights:
+    kldiv_loss: <float: the loss weight of ENCODER>
+    recon_loss: <float: the loss weight of RECONSTRUCTION>
+    steric_loss: 0.0 # Not to use
+    gan_loss: 0.0 # Not to use
+    kldiv2_loss: 0.0 # Not to use
+    recon2_loss: <float: the loss weight of adj matrix decoder>
+
+  schedules:# Not to use
+
+    kldiv_loss:
+      start_iter: 450000
+      end_wt: 1.6
+      period: 200000
+      type: d
+
+    recon_loss:
+      start_iter: 450000
+      end_wt: 4.0
+      period: 200000
+      type: n
+    
+    recon2_loss:
+      start_iter: 450000
+      end_wt: 4.0
+      period: 200000
+      type: n
+
+  learn_recon_var: 0
+
+gen_optim:
+  type: RMSprop # FIX
+  lr: <float: learning rate>
+  clip_gradient: 5000 # FIX
+  n_train_iters: 1 # FIX
+
+disc_optim: # Not to use
+  type: RMSprop
+  lr: 0.0e+00
+  clip_gradient: 0
+  n_train_iters: 0
+
+atom_fitting:# Not to use
+  beam_size: 1
+  multi_atom: False
+  n_atoms_detect: 1
+  apply_conv: False
+  threshold: 0.1
+  peak_value: 1.5
+  min_dist: 0.0
+  apply_prop_conv: False
+  interm_gd_iters: 10
+  final_gd_iters: 100
+
+train:
+  max_iter: <int: epochs to train>
+  n_test_batches: 10 # Not to use
+  test_interval: <int: the interval of test>
+  fit_interval: 100 # Not to use
+  norm_interval: 10 # Not to use
+  save_interval: <int: the interval of model saving>
+
+wandb:
+  use_wandb: <bool: use weight and biases or not>
+  out_prefix: <path: location of the wandb output log files>
+  mem: out_prefix will be deleted in on-stage run # FIX
+
+```
