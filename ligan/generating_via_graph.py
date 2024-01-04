@@ -22,6 +22,8 @@ from torch_geometric.data import DataLoader, Data
 import glob
 from torch_geometric.utils import smiles as gsmiles
 
+from graphsite import Graphsite
+gs = Graphsite()
 MB = 1024 ** 2
 
 
@@ -78,21 +80,22 @@ class MoleculeGenerator(object):
             **output_kws,
         )
 
-    def init_data(self, device, train_file, test_file, **data_kws):
+    def init_data(self, device, **data_kws):
         #self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=data_kws['batch_size'], train_ratio=data_kws['train_ratio'])
         #self.train_dataLoader, self.test_dataLoader = data.getDataLoader(train_file,batch_size=10**6, train_ratio=data_kws['train_ratio'])
         """ self.train_data = \
             data.AtomGridData(device=device, data_file=train_file, **data_kws)
         self.test_data = \
             data.AtomGridData(device=device, data_file=test_file, **data_kws) """
-        if data_kws["pickle"] is not None:
-            self.train_data = torch.load(data_kws["pickle"]+"/train3.pt")
-            self.test_data = torch.load(data_kws["pickle"]+"/test.pt")
+        if data_kws["train_data"] is not None:
+            self.train_data = torch.load(data_kws["train_data"])
+            self.test_data = torch.load(data_kws["test_data"])
         else:
-            __ds = data.biDataset(train_file, device=device)
+            assert False, "pickle file is not provided"
+            """ __ds = data.biDataset(train_file, device=device)
             train_size = int(len(__ds)*0.8)
             test_size = len(__ds) - train_size
-            self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size])
+            self.train_data , self.test_data= utils.data.random_split(__ds,[train_size,test_size]) """
         self.train_data = DataLoader(self.train_data,
                                      batch_size=data_kws['batch_size'],
                                      num_workers=0)
@@ -103,8 +106,7 @@ class MoleculeGenerator(object):
         profile_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.profile")
         pops_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.pops")
         mol2_path_list = [i for i in mol2_path_list if os.path.basename(i).split('.')[0][:4] not in [os.path.basename(j).split('.')[0] for j in profile_path_list]]
-        self.recept_list, _ = self.train_data.dataset.dataset.prot2graphlist(mol2_path_list=mol2_path_list, profile_path_list=profile_path_list, pops_path_list=pops_path_list)
-        import ipdb; ipdb.set_trace()
+        self.recept_list, _ = self.__prot2graphlist(mol2_path_list=mol2_path_list, profile_path_list=profile_path_list, pops_path_list=pops_path_list)
 
     def init_gen_model(
         self,
@@ -155,6 +157,29 @@ class MoleculeGenerator(object):
             return self.data.n_lig_channels
         else:
             return self.tmp_n_channels_out
+    
+    def __prot2graphlist(self, mol2_path_list, profile_path_list, pops_path_list):
+        """
+        This function takes a list of paths to mol2 files, a list of paths to profile files, and a list of paths to pops files as input.
+        It then attempts to convert each mol2 file, profile file, and pops file into a graph.
+        If the conversion is successful, the graph is added to the success_list.
+        If the conversion fails (for example, if an invalid mol2 file, profile file, or pops file is provided), the paths to the mol2 file, profile file, and pops file are added to the error_list.
+        The function ultimately returns two lists: success_list and error_list.
+        """
+        success_list = list()
+        error_list = list()
+        for mol2_path, profile_path, pops_path in zip(mol2_path_list, profile_path_list, pops_path_list):
+            try:
+                d = gs(mol_path=mol2_path,profile_path=profile_path,pop_path=pops_path)
+                d = Data(
+                    x=torch.from_numpy(d[0]).to(torch.float32),
+                    edge_index=torch.from_numpy(d[1]).to(torch.long),
+                    edge_attr=torch.from_numpy(d[2]).to(torch.float32),
+                    y=torch.tensor([0.0]).to(torch.float32))
+                success_list.append(d)
+            except:
+                error_list.append([mol2_path])
+        return success_list, error_list
 
     def forward(
         self,
@@ -171,20 +196,20 @@ class MoleculeGenerator(object):
 
             with torch.no_grad():
                 import ipdb ; ipdb.set_trace()
-                #TODO: get protein from data
-
-                protein = None
-                for num_node in range(1,100):
-                    in_latent_vec = torch.randn(num_node, 128).to(self.device)
-                    cond_latent_vec, skip_cond = self.gen_model.conditional_encoder(protein)
-                    cond = cond_latent_vec.x.mean(dim=0,keepdim=True).repeat(num_node, 1)
-                    latent_vec = torch.cat([in_latent_vec, cond_latent_vec], dim=1)
-                    
-                    adj_matrix = self.gen_model.attr_decoder(latent_vec)
-                    edge_index, edge_attr = data.convert_to_edge_attr(adj_matrix)
-                    output = self.gen_model.decoder(latent_vec, skip_cond)
-                    out_smiles = gsmiles.to_smiles(Data(output.x, edge_index, edge_attr, device=self.device), canonical=True, kekulize=True, isomericSmiles=True)
-                    smiles_list.append(out_smiles)
+                #TODO: impl skip_conneciton is False or True
+                for protein in self.recept_list:
+                    #protein = None
+                    for num_node in range(1,100):
+                        in_latent_vec = torch.randn(num_node, 128).to(self.device)
+                        cond_latent_vec, skip_cond = self.gen_model.conditional_encoder(protein)
+                        cond = cond_latent_vec.x.mean(dim=0,keepdim=True).repeat(num_node, 1)
+                        latent_vec = torch.cat([in_latent_vec, cond_latent_vec], dim=1)
+                        
+                        adj_matrix = self.gen_model.attr_decoder(latent_vec)
+                        edge_index, edge_attr = data.convert_to_edge_attr(adj_matrix)
+                        output = self.gen_model.decoder(latent_vec, skip_cond)
+                        out_smiles = gsmiles.to_smiles(Data(output.x, edge_index, edge_attr, device=self.device), canonical=True, kekulize=True, isomericSmiles=True)
+                        smiles_list.append(out_smiles)
         return smiles_list
         def try_detach(x):
             try:

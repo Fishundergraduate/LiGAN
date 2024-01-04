@@ -8,7 +8,6 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from zmq import device
 from .interpolation import Interpolation
 from torch_geometric.nn import GATConv, pool, GCNConv
 from torch_geometric.data import Data, Batch
