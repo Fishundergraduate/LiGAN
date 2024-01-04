@@ -9,6 +9,7 @@ from . import (
 	loss_fns,
 	training,
 	generating,
+	generating_via_graph,
 	interpolation,
 	atom_fitting,
 	bond_adding,
