@@ -5,6 +5,7 @@ from pathlib import Path
 from sklearn import utils
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 pd.set_option('display.width', 200)
 pd.set_option('display.max_columns', 10)
 pd.set_option('display.max_colwidth', 32)
@@ -18,15 +19,42 @@ from ligan.atom_grids import AtomGrid
 from ligan.atom_structs import AtomStruct
 from ligan import molecules as mols
 
-from torch_geometric.data import DataLoader, Data
+from torch_geometric.data import DataLoader, Data, Batch
 import glob
 from torch_geometric.utils import smiles as gsmiles
-
-from graphsite import Graphsite
-gs = Graphsite()
+from torch_geometric.utils import dense_to_sparse
+from torch import Tensor
+from torch.nn import functional as F
 MB = 1024 ** 2
 
+    
+def convert_to_edge_attr(adj_matrix:Tensor):
+    assert adj_matrix.shape[-1] == 3, "adj_matrix should be 3D tensor"
+    edge_bondtype = dense_to_sparse(adj_matrix[:,:,0])
+    edge_stereomer = dense_to_sparse(adj_matrix[:,:,1])
+    edge_conjugated = dense_to_sparse(adj_matrix[:,:,2])
 
+    edge_attr_stereo = torch.zeros_like(edge_bondtype[1])
+    edge_attr_conjugated = torch.zeros_like(edge_bondtype[1])
+
+    if edge_stereomer[0].shape[-1] > 0:
+        for i in range(edge_stereomer[0].shape[-1]):
+            mask = (edge_bondtype[0][0] == edge_stereomer[0][0][i]) & (edge_bondtype[0][1] == edge_stereomer[0][1][i])
+            mask_list = mask.nonzero(as_tuple=True)[0].tolist()
+            for idx in mask_list:
+                edge_attr_stereo[idx] = edge_stereomer[1][i]
+    if edge_conjugated[0].shape[-1] > 0:
+        for i in range(edge_conjugated[0].shape[-1]):
+            mask = (edge_bondtype[0][0] == edge_conjugated[0][0][i]) & (edge_bondtype[0][1] == edge_conjugated[0][1][i])
+            mask_list = mask.nonzero(as_tuple=True)[0].tolist()
+            for idx in mask_list:
+                edge_attr_conjugated[idx] = edge_conjugated[1][i]
+    edge_attr = torch.stack([
+        edge_bondtype[1],
+        edge_attr_stereo,
+        edge_attr_conjugated
+    ])
+    return edge_bondtype[0], edge_attr.T
 class MoleculeGenerator(object):
     '''
     Base class for generating 2D molecules
@@ -106,7 +134,9 @@ class MoleculeGenerator(object):
         profile_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.profile")
         pops_path_list = glob.glob(data_kws["target_recept_dir"]+"/*.pops")
         mol2_path_list = [i for i in mol2_path_list if os.path.basename(i).split('.')[0][:4] not in [os.path.basename(j).split('.')[0] for j in profile_path_list]]
-        self.recept_list, _ = self.__prot2graphlist(mol2_path_list=mol2_path_list, profile_path_list=profile_path_list, pops_path_list=pops_path_list)
+        profile_path_list = np.repeat(profile_path_list, len(mol2_path_list)).tolist()
+        pops_path_list = np.repeat(pops_path_list, len(mol2_path_list)).tolist()
+        self.recept_list, _ = self.train_data.dataset.dataset.prot2graphlist(mol2_path_list=mol2_path_list, profile_path_list=profile_path_list, pops_path_list=pops_path_list)
 
     def init_gen_model(
         self,
@@ -127,7 +157,7 @@ class MoleculeGenerator(object):
 
         if state:
             print('Loading generative model state')
-            state_dict = torch.load(state)
+            state_dict = torch.load(state, map_location=device)
             state_dict.pop('log_recon_var', None)
             self.gen_model.load_state_dict(state_dict)
 
@@ -157,29 +187,6 @@ class MoleculeGenerator(object):
             return self.data.n_lig_channels
         else:
             return self.tmp_n_channels_out
-    
-    def __prot2graphlist(self, mol2_path_list, profile_path_list, pops_path_list):
-        """
-        This function takes a list of paths to mol2 files, a list of paths to profile files, and a list of paths to pops files as input.
-        It then attempts to convert each mol2 file, profile file, and pops file into a graph.
-        If the conversion is successful, the graph is added to the success_list.
-        If the conversion fails (for example, if an invalid mol2 file, profile file, or pops file is provided), the paths to the mol2 file, profile file, and pops file are added to the error_list.
-        The function ultimately returns two lists: success_list and error_list.
-        """
-        success_list = list()
-        error_list = list()
-        for mol2_path, profile_path, pops_path in zip(mol2_path_list, profile_path_list, pops_path_list):
-            try:
-                d = gs(mol_path=mol2_path,profile_path=profile_path,pop_path=pops_path)
-                d = Data(
-                    x=torch.from_numpy(d[0]).to(torch.float32),
-                    edge_index=torch.from_numpy(d[1]).to(torch.long),
-                    edge_attr=torch.from_numpy(d[2]).to(torch.float32),
-                    y=torch.tensor([0.0]).to(torch.float32))
-                success_list.append(d)
-            except:
-                error_list.append([mol2_path])
-        return success_list, error_list
 
     def forward(
         self,
@@ -195,36 +202,34 @@ class MoleculeGenerator(object):
         if self.gen_model:
 
             with torch.no_grad():
-                import ipdb ; ipdb.set_trace()
                 #TODO: impl skip_conneciton is False or True
                 for protein in self.recept_list:
-                    #protein = None
-                    for num_node in range(1,100):
-                        in_latent_vec = torch.randn(num_node, 128).to(self.device)
+                    protein = protein.to(self.device)
+                    for num_node in tqdm(range(3,100)):
+                        in_latent_vec = torch.randn(num_node, 128).to(self.device)#,3
                         cond_latent_vec, skip_cond = self.gen_model.conditional_encoder(protein)
-                        cond = cond_latent_vec.x.mean(dim=0,keepdim=True).repeat(num_node, 1)
-                        latent_vec = torch.cat([in_latent_vec, cond_latent_vec], dim=1)
+                        cond = cond_latent_vec.x.mean(dim=0,keepdim=True).repeat(num_node, 1)#.unsqueeze(2).expand(-1,-1,3)
+                        latent_vec = torch.cat([in_latent_vec, cond], dim=1)
                         
-                        adj_matrix = self.gen_model.attr_decoder(latent_vec)
-                        edge_index, edge_attr = data.convert_to_edge_attr(adj_matrix)
-                        output = self.gen_model.decoder(latent_vec, skip_cond)
-                        out_smiles = gsmiles.to_smiles(Data(output.x, edge_index, edge_attr, device=self.device), canonical=True, kekulize=True, isomericSmiles=True)
-                        smiles_list.append(out_smiles)
+                        adj_matrix = self.gen_model.attr_decoder(Batch.from_data_list([Data(
+                            x = (latent_vec @ latent_vec.T).unsqueeze(2).expand(-1,-1,3), num_nodes = num_node,
+                            device=latent_vec.device,
+                            batch=torch.tensor(0,dtype=torch.int,device=latent_vec.device))]))
+                        edge_index, edge_attr = convert_to_edge_attr(adj_matrix.x)
+                        batch_cond = []
+                        for feat in skip_cond:
+                            single_cond_feat = []
+                            for i in range(1):
+                                __myx = F.pad(feat.x.mean(dim=0,keepdim=True).repeat(num_node, 1), (0, 0, 0, 0), "constant", 0)
+                                single_cond_feat.append(Data(x=__myx, batch=torch.tensor(0, dtype=torch.int, device=latent_vec.device), num_nodes = num_node, device = feat.x.device))
+                            batch_cond.append(Batch.from_data_list(single_cond_feat))
+                        output = self.gen_model.decoder(Batch.from_data_list([Data(x=latent_vec, num_nodes=num_node, device=latent_vec.device, batch=torch.tensor(0, device=latent_vec.device))]), batch_cond)
+                        try:
+                            out_smiles = gsmiles.to_smiles(Data(output.x, edge_index, edge_attr, device=self.device), kekulize=True)
+                            smiles_list.append(out_smiles)
+                        except:
+                            pass
         return smiles_list
-        def try_detach(x):
-            try:
-                return x.detach()
-            except AttributeError:
-                return x
-
-        input_grids = try_detach(input_rec_grids), try_detach(input_lig_grids)
-        cond_grids = try_detach(cond_rec_grids), try_detach(cond_lig_grids)
-        latents, lig_gen_grids = try_detach(latents), try_detach(lig_gen_grids)
-        return (
-            input_grids, cond_grids,
-            input_structs, cond_structs,
-            latents, lig_gen_grids, transforms
-        )
 
     def generate(
         self,
@@ -271,11 +276,7 @@ class MoleculeGenerator(object):
 
                 #if gnina_minimize: # copy to gpu
                 #    self.gen_model.to('cuda')
-                (
-                    input_grids, cond_grids,
-                    input_structs, cond_structs,
-                    latents, lig_gen_grids, transforms
-                ) = self.forward(
+                out_smiles = self.forward(
                     prior=prior,
                     stage2=stage2,
                     var_factor=var_factor,
@@ -285,232 +286,7 @@ class MoleculeGenerator(object):
                     interpolate=interpolate,
                     spherical=spherical,
                 )
-                input_rec_grids, input_lig_grids = input_grids
-                cond_rec_grids, cond_lig_grids = cond_grids
-                input_rec_structs, input_lig_structs = input_structs
-                cond_rec_structs, cond_lig_structs = cond_structs
-                input_transforms, cond_transforms = transforms
-                #if gnina_minimize: # copy to cpu
-                #    self.gen_model.to('cpu')
-
-            input_rec_struct = input_rec_structs[batch_idx]
-            input_lig_struct = input_lig_structs[batch_idx]
-            cond_rec_struct = cond_rec_structs[batch_idx]
-            cond_lig_struct = cond_lig_structs[batch_idx]
-
-            # in order to align gen structs with real structs,
-            #   we need to apply the inverse of the transform
-            #   that was used to create the density grid that
-            #   is the reconstruction target (assume conditional)
-            input_transform = input_transforms[batch_idx]
-            cond_transform = cond_transforms[batch_idx]
-            input_center = torch.as_tensor(tuple(
-                input_transform.get_rotation_center()
-            ))
-            cond_center = torch.as_tensor(tuple(
-                cond_transform.get_rotation_center()
-            ))
-
-            # only process real rec/lig once, since they're
-            #   the same for all samples of a given ligand
-            if need_real_input_mol:
-                print('Getting real input molecule from data root')
-                splitext = lambda x: x.rsplit('.', 1 + x.endswith('.gz'))
-
-                input_rec_src_file = input_rec_struct.info['src_file']
-                input_rec_mol = read_rec_from_pdb_file(input_rec_src_file)
-                input_rec_name = \
-                    splitext(os.path.basename(input_rec_src_file))[0]
-
-                input_lig_src_file = input_lig_struct.info['src_file']
-                input_lig_mol = read_lig_from_sdf_file(input_lig_src_file)
-                input_lig_name = \
-                    splitext(os.path.basename(input_lig_src_file))[0]
-
-                if uff_minimize:
-                    # real molecules don't need UFF minimization,
-                    #   but we need their UFF metrics for reference
-                    input_pkt_mol = \
-                        input_rec_mol.get_pocket(lig_mol=input_lig_mol)
-                    input_lig_mol.info['pkt_mol'] = input_pkt_mol
-                    input_uff_mol = \
-                        input_lig_mol.uff_minimize(rec_mol=input_pkt_mol)
-                    input_lig_mol.info['uff_mol'] = input_uff_mol
-
-                    if gnina_minimize and minimize_real:
-                        print('Minimizing real molecule with gnina', flush=True)
-                        # NOTE that we are not using the UFF mol here
-                        input_lig_mol.info['gni_mol'] = \
-                            input_lig_mol.gnina_minimize(rec_mol=input_rec_mol)
-
-                if add_to_real: # evaluate bond adding in isolation
-                    print('Adding bonds to real atoms')
-                    lig_add_mol, lig_add_struct, _ = \
-                        self.bond_adder.make_mol(input_lig_struct)
-                    lig_add_mol.info['type_struct'] = lig_add_struct
-                    lig_struct.info['add_mol'] = lig_add_mol
-
-                    if uff_minimize:
-                        print('Minimizing molecule from real atoms with UFF',
-                            end='') # show number of tries inline
-                        lig_add_pkt_mol = \
-                            input_rec_mol.get_pocket(lig_mol=lig_add_mol)
-                        lig_add_mol.info['pkt_mol'] = lig_add_pkt_mol
-                        lig_add_uff_mol = \
-                            lig_add_mol.uff_minimize(rec_mol=lig_add_pkt_mol)
-                        lig_add_mol.info['uff_mol'] = lig_add_uff_mol
-
-                        if gnina_minimize:
-                            print('Minimizing molecule from real atoms with gnina', flush=True)
-                            lig_add_mol.info['gni_mol'] = \
-                                lig_add_uff_mol.gnina_minimize(rec_mol=input_rec_mol)
-
-            else: # check that the molecules are the same
-                assert input_rec_struct.info['src_file'] == input_rec_src_file
-                assert input_lig_struct.info['src_file'] == input_lig_src_file
-
-            cond_rec_name = input_rec_name
-            cond_lig_name = input_lig_name
-
-            # unique identifier for this data example
-            example_info = (
-                example_idx,
-                input_rec_name,
-                input_lig_name,
-                cond_rec_name,
-                cond_lig_name,
-            )
-
-            # done processing real mols/structs, so attach them
-            input_rec_struct.info['src_mol'] = input_rec_mol
-            input_lig_struct.info['src_mol'] = input_lig_mol
-            if self.data.diff_cond_structs:
-                cond_rec_struct.info['src_mol'] = cond_rec_mol
-                cond_lig_struct.info['src_mol'] = cond_lig_mol
-
-            # now process atomic density grids
-            grid_types = [
-                ('rec', input_rec_grids),
-                ('lig', input_lig_grids),  
-            ]
-            if self.data.diff_cond_structs or self.data.diff_cond_transform:
-                grid_types += [
-                    ('cond_rec', cond_rec_grids),
-                    ('cond_lig', cond_lig_grids)
-                ]
-            if self.gen_model:
-                grid_types += [
-                    ('lig_gen', lig_gen_grids)
-                ]
-
-            for grid_type, grids in grid_types:
-                torch.cuda.reset_max_memory_allocated()
-
-                is_cond_grid = grid_type.startswith('cond')
-                is_lig_grid = ('lig' in grid_type)
-                is_gen_grid = grid_type.endswith('gen')
-                real_or_gen = 'generated' if is_gen_grid else 'real'
-
-                if is_gen_grid:
-                    grid_needs_fit = fit_atoms and is_lig_grid
-                    center = cond_center
-                elif is_cond_grid:
-                    grid_need_fit = False
-                    center = cond_center
-                else:
-                    grid_needs_fit = fit_to_real and is_lig_grid
-                    center = input_center
-
-                if is_lig_grid:
-                    atom_typer = self.data.lig_typer
-                else:
-                    atom_typer = self.data.rec_typer
-
-                grid = ligan.atom_grids.AtomGrid(
-                    values=grids[batch_idx],
-                    typer=atom_typer,
-                    center=center,
-                    resolution=self.data.resolution
-                )
-
-                if grid_type == 'rec':
-                    grid.info['src_struct'] = input_rec_struct
-                elif grid_type == 'lig':
-                    grid.info['src_struct'] = input_lig_struct
-                elif grid_type == 'cond_rec':
-                    grid.info['src_struct'] = cond_rec_struct
-                elif grid_type == 'cond_lig':
-                    grid.info['src_struct'] = cond_lig_struct
-                elif grid_type == 'lig_gen':
-                    grid.info['src_latent'] = latents[batch_idx]
-
-                # display progress
-                index_str = f'[example_idx={example_idx} sample_idx={sample_idx} grid_type={grid_type}]'
-                value_str = 'norm={:.4f} gpu={:.4f}'.format(
-                    grid.values.norm(),
-                    torch.cuda.max_memory_allocated() / MB,
-                )
-                print(index_str + ' ' + value_str, flush=True)
-
-                if is_lig_grid and self.out_writer.output_conv:
-                    grid.info['conv_grid'] = grid.new_like(
-                        values=torch.cat([
-                            atom_fitter.convolve(
-                                grid.elem_values, grid.resolution, grid.typer
-                            ),
-                            grid.prop_values
-                        ], dim=0)
-                    )
-
-                self.out_writer.write(example_info, sample_idx, grid_type, grid)
-
-                if grid_needs_fit: # perform atom fitting
-
-                    print(f'Fitting atoms to {real_or_gen} grid')
-                    fit_struct, fit_grid, visited_structs = self.atom_fitter.fit_struct(grid, cond_lig_struct.type_counts)
-                    fit_struct.info['visited_structs'] = visited_structs
-                    fit_grid.info['src_struct'] = fit_struct
-
-                    if fit_struct.n_atoms > 0: # inverse transform
-                        cond_transform.backward(fit_struct.coords, fit_struct.coords)
-
-                    if add_bonds: # do bond adding
-                        print(f'Adding bonds to atoms from {real_or_gen} grid')
-                        fit_add_mol, fit_add_struct, visited_mols = \
-                            self.bond_adder.make_mol(fit_struct)
-                        fit_add_mol.info['type_struct'] = fit_add_struct
-                        fit_struct.info['add_mol'] = fit_add_mol
-
-                        if uff_minimize: # do UFF minimization
-                            print(f'Minimizing molecule from {real_or_gen} grid with UFF', end='')
-                            fit_pkt_mol = input_rec_mol.get_pocket(fit_add_mol)
-                            fit_add_mol.info['pkt_mol'] = fit_pkt_mol
-                            fit_uff_mol = \
-                                fit_add_mol.uff_minimize(rec_mol=fit_pkt_mol)
-                            fit_add_mol.info['uff_mol'] = fit_uff_mol
-
-                            if gnina_minimize: # do gnina minimization
-                                print(f'Minimizing molecule from {real_or_gen} grid with gnina', flush=True)
-                                fit_add_mol.info['gni_mol'] = fit_uff_mol.gnina_minimize(rec_mol=input_rec_mol)
-
-                        # minimize and score wrt conditional receptor too
-                        if self.data.diff_cond_structs and uff_minimize:
-                            print(f'Minimizing molecule from {real_or_gen} grid with UFF wrt conditional receptor', end='')
-                            fit_pkt_mol = cond_rec_mol.get_pocket(fit_add_mol)
-                            fit_add_mol.info['cond_pkt_mol'] = fit_pkt_mol
-                            fit_uff_mol = \
-                                fit_add_mol.uff_minimize(rec_mol=fit_pkt_mol)
-                            fit_add_mol.info['cond_uff_mol'] = fit_uff_mol
-
-                            if gnina_minimize: # do gnina minimization
-                                print(f'Minimizing molecule from {real_or_gen} grid with gnina wrt conditional receptor', flush=True)
-                                fit_add_mol.info['cond_gni_mol'] = \
-                                    fit_uff_mol.gnina_minimize(rec_mol=cond_rec_mol)
-
-                    grid_type += '_fit'
-                    self.out_writer.write(
-                        example_info, sample_idx, grid_type, fit_grid
-                    )
+        import ipdb; ipdb.set_trace()
 
         return self.out_writer.metrics
 
