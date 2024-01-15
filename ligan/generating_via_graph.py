@@ -26,7 +26,8 @@ from torch_geometric.utils import dense_to_sparse
 from torch import Tensor
 from torch.nn import functional as F
 MB = 1024 ** 2
-
+import itertools
+import random
     
 def convert_to_edge_attr(adj_matrix:Tensor):
     assert adj_matrix.shape[-1] == 3, "adj_matrix should be 3D tensor"
@@ -200,12 +201,14 @@ class MoleculeGenerator(object):
 
         smiles_list = []
         if self.gen_model:
-
+            num_nodes = \
+                [36, 23, 33, 34, 37, 35, 27, 28, 31, 21, 35, 27, 22, 20, 24, 32, 30, 28, 36, 21, 21, 32, 33, 34, 24, 20, 30, 35, 26, 25, 21, 27, 27, 24, 27, 26, 30, 21, 21, 33, 25, 20, 29, 32, 47, 36, 21, 21, 35, 34, 21, 27, 30, 27, 28, 31, 25, 23, 35, 38, 20, 29, 30, 32, 29, 21, 36, 29, 19, 38, 30, 33, 35, 20, 26, 36, 26, 31, 26, 20, 24, 37, 27, 28, 30, 25, 28, 28, 29, 24, 38, 29, 20, 24, 32, 19, 31, 31, 30, 32, 30, 35, 26, 30, 36, 34, 35, 25, 33, 19, 25, 30, 22, 43, 26, 30, 25, 26, 35, 26, 22, 34, 30, 31, 29, 25, 25, 35, 35, 35, 36, 28, 32, 36, 27, 36, 22, 36, 38, 24, 22, 24, 29, 33, 23, 24, 32, 32, 24, 37, 47, 43, 26, 28, 31, 32, 24, 37, 31, 43, 43, 25, 27, 36, 31, 21, 34, 32, 36, 43, 33, 35, 23, 28, 29, 26, 31, 43, 32, 21, 34, 32, 24, 24, 38, 36, 20, 25, 35, 39, 29, 36, 32, 35, 25, 33, 31, 22, 24, 39, 44, 34, 31, 35, 30, 43, 40, 34, 37, 33, 33, 28, 34, 25, 36, 47, 32, 32, 23, 33, 23, 29, 25, 24, 31, 35, 23, 25, 34, 23, 30, 34, 25, 32, 33, 37, 28, 26, 35, 49, 25, 37, 34, 21, 33, 26, 23, 22, 15, 32, 37, 29, 35, 26, 42, 32, 35, 33, 25, 33, 31, 32, 25, 32, 33, 29, 33, 39, 31, 35, 39, 23, 47, 33, 27, 37, 32, 33, 23, 32, 24, 30, 34, 23, 23, 25, 26, 32, 32, 36, 37, 37, 22, 28, 32, 16, 33, 49, 30, 29, 37, 36, 21, 25, 21, 26, 25, 29, 24, 27, 26, 33, 36, 39, 35, 28, 20, 33, 23, 36, 27, 26, 14, 29, 25, 31, 27, 25, 34, 49, 33, 33, 26, 41, 31, 27, 23, 28, 21, 25, 27, 27, 23, 22, 49, 23, 22, 26, 33, 35, 25, 25, 25, 33, 39, 34, 33, 26, 33, 38, 49, 20, 26, 38, 23, 33, 24, 37, 24, 25, 32, 27, 45, 29, 36, 27, 22, 33, 18, 29, 35, 32, 26, 17, 30, 27, 29, 26, 29, 34, 26, 26, 26, 32, 32, 24, 31, 26, 24, 33, 20, 34, 24, 26, 29, 31, 32, 32, 23, 32, 19, 35, 23, 22, 29, 26, 19, 33, 31, 22, 24, 29, 35, 25, 31, 39, 30, 34, 20, 32, 26, 39, 24, 27, 26, 23, 27, 34, 25, 24, 35, 36, 24, 32, 36, 38, 32, 33, 34, 31, 34, 36, 34, 28, 18, 37, 45, 38, 42, 24, 30, 29, 30, 33, 27, 40, 18, 37, 25, 25, 23, 37, 28, 34, 35, 33, 29, 41, 18, 29, 40, 38, 37, 33, 37, 26, 36, 35, 33, 41, 38, 27, 29, 27, 25, 33, 33, 34, 32, 32, 23, 39, 31, 39, 33, 35, 31, 23, 33, 26, 42, 35, 25, 39, 31, 34, 24, 36, 17, 31, 39, 34, 34, 32, 38, 40, 37, 37, 33, 29, 30, 37, 33, 26, 46, 36, 35, 22, 30, 21, 39, 38, 35, 30, 36, 41, 32, 30, 29, 21, 38, 33, 33, 39, 34, 34, 26, 34, 39, 44, 30, 36, 35, 32, 36, 39, 36, 29, 32, 32, 35, 34, 33, 34, 31, 34, 39, 39, 44, 39, 31, 34, 35, 30, 37, 37, 39, 40, 36, 35, 36, 43, 38, 40, 37, 29, 38, 36, 36, 43, 44, 31, 37, 33, 38, 35, 34, 32, 34, 19, 35, 38, 33, 40, 32, 30, 29, 35, 33, 39, 47, 33, 40, 38, 39, 38, 33, 35, 25, 32, 30, 36, 37, 33, 33, 37, 40, 37, 34, 38, 32, 35, 33, 37, 34, 46, 35, 34, 29, 33, 36, 30, 33, 33, 29, 33, 36, 36, 32, 46, 34, 33, 31, 33, 30, 36, 30, 31, 34, 35, 36, 33, 46, 35]
             with torch.no_grad():
                 #TODO: impl skip_conneciton is False or True
                 for protein in self.recept_list:
                     protein = protein.to(self.device)
-                    for num_node in tqdm(range(3,100)):
+                    for _ in tqdm(range(100)):
+                        num_node = random.choice(num_nodes)
                         in_latent_vec = torch.randn(num_node, 128).to(self.device)#,3
                         cond_latent_vec, skip_cond = self.gen_model.conditional_encoder(protein)
                         cond = cond_latent_vec.x.mean(dim=0,keepdim=True).repeat(num_node, 1)#.unsqueeze(2).expand(-1,-1,3)
@@ -260,6 +263,7 @@ class MoleculeGenerator(object):
         batch_size = self.batch_size
 
         print('Starting to generate grids')
+        out_smiles_all = []
         for example_idx, sample_idx in itertools.product(
             range(n_examples), range(n_samples)
         ):
@@ -286,7 +290,8 @@ class MoleculeGenerator(object):
                     interpolate=interpolate,
                     spherical=spherical,
                 )
-        import ipdb; ipdb.set_trace()
+                out_smiles_all.extend(out_smiles)
+        self.out_writer.write_smiles('smiles.csv', out_smiles_all)
 
         return self.out_writer.metrics
 
@@ -443,6 +448,12 @@ class OutputWriter(object):
         self.print('Writing ' + str(latent_file))
         write_latent_vec_to_file(latent_file, latent_vec)
 
+    def write_smiles(self, smiles_file_name, smiles_list):
+        
+        self.print('Writing ' + str(self.mol_dir / smiles_file_name))
+        df = pd.DataFrame(smiles_list, columns=['smiles'])
+        df.to_csv(str(self.mol_dir / smiles_file_name), index=False)
+    
     def write(self, example_info, sample_idx, grid_type, grid):
         '''
         Write output files for grid and compute metrics in
