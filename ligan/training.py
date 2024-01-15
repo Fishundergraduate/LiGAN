@@ -177,9 +177,9 @@ class GenerativeSolver(nn.Module):
         **gen_model_kws
     ):
         self.gen_model = self.gen_model_type(
-            n_channels_in=9,#self.n_channels_in,
+            n_channels_in=4,#self.n_channels_in,
             n_channels_cond=11,#self.n_channels_cond,
-            n_channels_out=9,#self.n_channels_out,
+            n_channels_out=4,#self.n_channels_out,
             device=device,
             **gen_model_kws
         )
@@ -448,7 +448,7 @@ class GenerativeSolver(nn.Module):
         if self.sync_cuda:
             torch.cuda.synchronize() """
         t1 = time.time()
-
+        #import ipdb ; ipdb.set_trace()
         """ if posterior: # set generator input grids
             gen_input_grids = \
                 input_grids if self.has_complex_input else input_lig_grids """

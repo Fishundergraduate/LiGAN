@@ -13,7 +13,8 @@ from . import (
 	interpolation,
 	atom_fitting,
 	bond_adding,
-	metrics
+	metrics,
+    lsmiles
 )
 from .common import set_random_seed
 

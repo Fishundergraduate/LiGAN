@@ -1132,10 +1132,10 @@ class GridDecoder(nn.Module):
 class AdjDecoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.fc1 = nn.Linear(3,12)
-        self.fc2 = nn.Linear(12,24)
-        self.fc3 = nn.Linear(24,12)
-        self.fc4 = nn.Linear(12,3)
+        self.fc1 = nn.Linear(1,2)
+        self.fc2 = nn.Linear(2,4)
+        self.fc3 = nn.Linear(4,2)
+        self.fc4 = nn.Linear(2,1)
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, data:Batch):
@@ -1149,7 +1149,7 @@ class AdjDecoder(nn.Module):
         x = torch.relu(x)
         x = self.dropout(x)
         x = self.fc4(x)
-        x = torch.relu(x)
+        x = torch.tanh(x)
         data.x = x
         return data
 
@@ -1361,9 +1361,11 @@ class CVAE(GridGenerator):
         batched_vecs = Batch.from_data_list(vecs_data_list)
         
         in_latents_tens = in_latents @ in_latents.T
-        in_latents_stacked = [F.pad(in_latents_tens[start:end, start:end].unsqueeze(-1).repeat(1, 1, 3), (0, 0, 0, max_num_nodes - (end - start), 0, max_num_nodes - (end - start)), "constant", 0) for start, end in indices] # 3 for 3 channels in edge_attr
+        #in_latents_stacked = [F.pad(in_latents_tens[start:end, start:end].unsqueeze(-1).repeat(1, 1, 3), (0, 0, 0, max_num_nodes - (end - start), 0, max_num_nodes - (end - start)), "constant", 0) for start, end in indices] # 3 for 3 channels in edge_attr
+        in_latents_stacked = [F.pad(in_latents_tens[start:end, start:end].unsqueeze(-1), ( 0, 0, 0, max_num_nodes - (end - start), 0,max_num_nodes - (end - start)), "constant", 0) for start, end in indices] # 3 for 3 channels in edge_attr
         in_vecs_data_list = [Data(x=in_latents_stacked[i], batch=batch_inds[i], num_nodes = num_nodes_list[i], device = in_latents_stacked[i].device) for i in range(batch_size)]
         batched_in_vecs = Batch.from_data_list(in_vecs_data_list)
+        #import ipdb; ipdb.set_trace()
         adj_matr = self.attr_decoder(batched_in_vecs)
         
         ## TODO: conditions should be batched

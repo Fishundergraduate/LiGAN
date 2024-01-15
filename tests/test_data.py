@@ -11,7 +11,8 @@ from ligan.atom_structs import AtomStruct
 batch_size = 10
 
 def test_data():
-    dataset = biDataset("/mnt/d/Documents_2023/data")
+    dataset = biDataset("/mnt/d/Documents_2023/aa2ar", 5)
+    assert len(dataset) > 5
     for i,d in enumerate(dataset):
         print(i,d)
         if i > 10:

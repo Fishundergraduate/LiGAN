@@ -20,11 +20,14 @@ from torchdata import datapipes
 from glob import glob
 from rdkit import RDLogger, Chem
 
-from torch_geometric.utils import smiles, dense_to_sparse
+#from torch_geometric.utils import smiles, dense_to_sparse
+from torch_geometric.utils import dense_to_sparse
 from Bio.PDB import PDBParser
 from scipy.spatial.distance import cdist
 import torch
 import periodictable as pt
+
+from . import lsmiles as smiles
 # RDKitのエラーメッセージを無効にする
 RDLogger.DisableLog('rdApp.*')
 gs = Graphsite()
