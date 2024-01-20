@@ -177,9 +177,9 @@ class GenerativeSolver(nn.Module):
         **gen_model_kws
     ):
         self.gen_model = self.gen_model_type(
-            n_channels_in=4,#self.n_channels_in,
+            n_channels_in=3,#self.n_channels_in,
             n_channels_cond=11,#self.n_channels_cond,
-            n_channels_out=4,#self.n_channels_out,
+            n_channels_out=3,#self.n_channels_out,
             device=device,
             **gen_model_kws
         )
