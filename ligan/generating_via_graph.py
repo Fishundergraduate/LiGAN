@@ -86,9 +86,9 @@ class MoleculeGenerator(object):
     
         print('Loading data')
         self.init_data(device=device, **data_kws)
-        self.tmp_n_channels_in = 9
+        self.tmp_n_channels_in = 3
         self.tmp_n_channels_cond = 11
-        self.tmp_n_channels_out = 9
+        self.tmp_n_channels_out = 3
         self.batch_size = data_kws['batch_size']
         
         if self.gen_model_type:
@@ -286,7 +286,6 @@ class MoleculeGenerator(object):
                     interpolate=interpolate,
                     spherical=spherical,
                 )
-        import ipdb; ipdb.set_trace()
 
         return self.out_writer.metrics
 
